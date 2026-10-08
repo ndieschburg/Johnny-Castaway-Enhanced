@@ -14,6 +14,12 @@ var (
 	// holds the raw value for propagating the flag to child processes).
 	forcedHoliday    int
 	forcedHolidayArg string
+
+	// forcedNight overrides the hour-derived day/night mode when >= 0
+	// (0 = day, 1 = night). Set by the -d/--day and -n/--night flags.
+	// forcedDayNightA holds the raw value for child process propagation.
+	forcedNight     = -1
+	forcedDayNightA = ""
 )
 
 func storyPickScene(wantedFlags uint16, unwantedFlags uint16) *TStoryScene {
@@ -63,6 +69,10 @@ func storyCalculateIslandFromDateAndTime() {
 	hour := getHour()
 	if hour < 6 || hour >= 18 {
 		islandState.night = 1
+	}
+	// A forced day/night (-d/-n) overrides the hour-derived mode.
+	if forcedNight >= 0 {
+		islandState.night = forcedNight
 	}
 
 	// Holidays ?

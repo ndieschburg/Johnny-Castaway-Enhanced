@@ -517,6 +517,8 @@ func printUsage() {
 	fmt.Println("  -x <holiday>          force the island holiday decoration")
 	fmt.Println("                        halloween|patrick|christmas|newyear|none (or 1-4);")
 	fmt.Println("                        propagated to per-monitor child instances")
+	fmt.Println("  -d, --day             force daytime island/sky rendering")
+	fmt.Println("  -n, --night           force nighttime island/sky rendering")
 	fmt.Println()
 	fmt.Println("  -h, --help, -?        show this help")
 }
@@ -587,6 +589,14 @@ func main() {
 		} else if argLower == "-h" || argLower == "--help" || argLower == "-?" ||
 			argLower == "/h" || argLower == "/?" {
 			showHelp = true
+		} else if argLower == "-d" || argLower == "--day" || argLower == "/d" {
+			// force day mode (island/sky rendered as daytime)
+			forcedNight = 0
+			forcedDayNightA = "day"
+		} else if argLower == "-n" || argLower == "--night" || argLower == "/n" {
+			// force night mode
+			forcedNight = 1
+			forcedDayNightA = "night"
 		} else if strings.HasPrefix(argLower, "/m") || strings.HasPrefix(argLower, "-m") || strings.HasPrefix(argLower, "--monitor") {
 			hasMonitorIndex = true
 			runOnMonitorIndex = 0
@@ -714,6 +724,11 @@ func runStory() {
 				}
 				if forcedHolidayArg != "" {
 					args = append(args, "-x", forcedHolidayArg)
+				}
+				if forcedDayNightA == "day" {
+					args = append(args, "-d")
+				} else if forcedDayNightA == "night" {
+					args = append(args, "-n")
 				}
 				cmd := exec.Command(os.Args[0], args...)
 				
