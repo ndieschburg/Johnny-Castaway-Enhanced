@@ -872,6 +872,16 @@ func runTestMode(testAdsName string, testTagNo int) {
 	islandState.lowTide = 0
 	islandState.raft = 0
 
+	// Day/night mode: honor the -d/-n flags, otherwise fall back to the
+	// current hour like the story mode does (the engine naturally switches
+	// at 06:00 and 18:00). Without this, test mode always rendered the
+	// daytime island regardless of the wall clock or the forced flags.
+	if forcedNight >= 0 {
+		islandState.night = forcedNight
+	} else if h := getHour(); h < 6 || h >= 18 {
+		islandState.night = 1
+	}
+
 	// Find the scene in storyScenes so test mode can mirror its actual story-day,
 	// raft stage, tide eligibility, and island positioning instead of using a
 	// generic hardcoded island setup.
