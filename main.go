@@ -495,11 +495,38 @@ func runOptionsWindow() {
 	}
 }
 
+func printUsage() {
+	fmt.Println("Johnny Castaway Enhanced - classic screensaver, Go/raylib port")
+	fmt.Println()
+	fmt.Println("Usage: JohnnyCastaway2026 [mode] [options]")
+	fmt.Println()
+	fmt.Println("Modes (mutually exclusive):")
+	fmt.Println("  (none)                screensaver mode spanning all monitors (Escape or mouse exits)")
+	fmt.Println("  -s, /s                screensaver mode, any key exits (standard Windows /s launch)")
+	fmt.Println("  -c, /c                options/settings dialog")
+	fmt.Println("  -p, /p                screensaver preview call (quietly exits)")
+	fmt.Println("  -t, /t [ADS] [tag]    developer test mode: loop one scene sequence")
+	fmt.Println("                        (default: ACTIVITY.ADS 4 + JOHNNY.ADS 3; e.g. /t BUILDING.ADS 2)")
+	fmt.Println("  -b, /b                render benchmark (3 passes of 1/4/8 sprite layers, bench.log)")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  -k, /k                interactive debug hotkeys (Space=pause, Enter=step,")
+	fmt.Println("                        M=max speed, Shift=debug overlay, Escape=quit)")
+	fmt.Println("  -m N, /m N            fullscreen on monitor N only (also: -m:N)")
+	fmt.Println("  -1, /main, /single    primary monitor only")
+	fmt.Println("  -x <holiday>          force the island holiday decoration")
+	fmt.Println("                        halloween|patrick|christmas|newyear|none (or 1-4);")
+	fmt.Println("                        propagated to per-monitor child instances")
+	fmt.Println()
+	fmt.Println("  -h, --help, -?        show this help")
+}
+
 func main() {
 	var isSettings = false
 	var isPreview = false
 	var isTest = false
 	var isBench = false
+	var showHelp = false
 	var testAdsName = ""
 	var testTagNo = 0
 
@@ -557,6 +584,9 @@ func main() {
 				forcedHolidayArg = holidayArg
 				forcedHoliday = holidayFromArg(holidayArg)
 			}
+		} else if argLower == "-h" || argLower == "--help" || argLower == "-?" ||
+			argLower == "/h" || argLower == "/?" {
+			showHelp = true
 		} else if strings.HasPrefix(argLower, "/m") || strings.HasPrefix(argLower, "-m") || strings.HasPrefix(argLower, "--monitor") {
 			hasMonitorIndex = true
 			runOnMonitorIndex = 0
@@ -569,6 +599,11 @@ func main() {
 				fmt.Sscanf(os.Args[i+1], "%d", &runOnMonitorIndex)
 			}
 		}
+	}
+
+	if showHelp {
+		printUsage()
+		os.Exit(0)
 	}
 
 	var initialConfig TConfig
