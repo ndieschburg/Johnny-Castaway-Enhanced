@@ -503,7 +503,11 @@ func main() {
 	var testAdsName = ""
 	var testTagNo = 0
 
-	for i, arg := range os.Args {
+	// Skip os.Args[0] (the executable path): a binary installed under a
+	// path like /tmp/... or /s... would otherwise match the flag prefixes
+	// below and accidentally switch modes.
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
 		argLower := strings.ToLower(arg)
 		if strings.HasPrefix(argLower, "/c") || strings.HasPrefix(argLower, "-c") {
 			isSettings = true
