@@ -536,6 +536,27 @@ func main() {
 			argLower == "/primary" || argLower == "-primary" || argLower == "--primary" {
 			hasMonitorIndex = true
 			runOnMonitorIndex = 0
+		} else if strings.HasPrefix(argLower, "/x") || strings.HasPrefix(argLower, "-x") || strings.HasPrefix(argLower, "--holiday") {
+			// -x <name|id> forces the holiday decoration: halloween (1),
+			// patrick (2), christmas (3), newyear (4); none suppresses
+			// calendar holidays entirely.
+			holidayArg := ""
+			if strings.Contains(argLower, ":") || strings.Contains(argLower, "=") {
+				parts := strings.FieldsFunc(arg, func(r rune) bool { return r == ':' || r == '=' })
+				if len(parts) > 1 {
+					holidayArg = strings.ToLower(parts[1])
+				}
+			} else if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") && !strings.HasPrefix(os.Args[i+1], "/") {
+				holidayArg = strings.ToLower(os.Args[i+1])
+			}
+			if holidayArg == "" && strings.HasPrefix(argLower, "-x") && len(argLower) > 2 {
+				// Compact form: -xhalloween, -xchristmas...
+				holidayArg = argLower[2:]
+			}
+			if holidayArg != "" {
+				forcedHolidayArg = holidayArg
+				forcedHoliday = holidayFromArg(holidayArg)
+			}
 		} else if strings.HasPrefix(argLower, "/m") || strings.HasPrefix(argLower, "-m") || strings.HasPrefix(argLower, "--monitor") {
 			hasMonitorIndex = true
 			runOnMonitorIndex = 0
@@ -655,6 +676,9 @@ func runStory() {
 				}
 				if hotKeysEnabled {
 					args = append(args, "-k")
+				}
+				if forcedHolidayArg != "" {
+					args = append(args, "-x", forcedHolidayArg)
 				}
 				cmd := exec.Command(os.Args[0], args...)
 				
