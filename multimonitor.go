@@ -95,9 +95,17 @@ func setupMonitors() {
 		for i := 0; i < 10; i++ {
 			pumpFrame()
 		}
-		rl.ToggleFullscreen()
 		if hasMonitorIndex {
-			rl.SetWindowMonitor(runOnMonitorIndex)
+			// A single set_fullscreen(output) request for the target
+			// monitor. Never fullscreen on a guessed monitor first: on
+			// multi-monitor runs two children map on the focused
+			// workspace, and a guess-based transit fullscreen makes one
+			// child occupy (and leak) that workspace's fullscreen slot, so
+			// the sibling's request is silently dropped - Wayland gives
+			// the client no feedback for a dropped request.
+			requestFullscreenOnMonitor(runOnMonitorIndex)
+		} else {
+			rl.ToggleFullscreen()
 		}
 
 		// Wait until the compositor-applied fullscreen resize reaches the
@@ -105,14 +113,11 @@ func setupMonitors() {
 		// widescreen virtual canvas width) sees the final size and not the
 		// initial 640x480 one.
 		//
-		// xdg fullscreen is only a request: GLFW's monitor switch sends
-		// unset_fullscreen followed by set_fullscreen, and a race with
-		// compositor-side window rules can leave the last applied state
-		// windowed (a black partial-screen window on multi-monitor runs).
+		// xdg fullscreen is only a request, and the compositor may drop it
+		// (e.g. when a fullscreen window just vacated the workspace).
 		// Verify the window really covers its target monitor and re-issue
-		// the whole request sequence when it does not: the renderer checks
-		// the actual framebuffer size, which is the only ground truth a
-		// Wayland client can read back.
+		// the request when it does not: the framebuffer size is the only
+		// ground truth a Wayland client can read back.
 		targetW := rl.GetMonitorWidth(monitor)
 		targetH := rl.GetMonitorHeight(monitor)
 		for attempt := 0; attempt < 5; attempt++ {
@@ -128,15 +133,15 @@ func setupMonitors() {
 				break
 			}
 
-			// Not covering the target monitor: re-request fullscreen.
-			// Toggle back to windowed first so raylib and GLFW reset their
-			// fullscreen bookkeeping, then fullscreen again and switch to
-			// the target monitor (the switch sends a fresh
-			// set_fullscreen(output) request for that monitor).
-			rl.ToggleFullscreen()
-			rl.ToggleFullscreen()
+			// Not covering the target monitor: unbind the fullscreen
+			// bookkeeping so a fresh request is actually sent (GLFW
+			// early-returns when the monitor is unchanged), then request
+			// fullscreen on the target monitor again.
+			releaseFullscreen()
 			if hasMonitorIndex {
-				rl.SetWindowMonitor(runOnMonitorIndex)
+				requestFullscreenOnMonitor(runOnMonitorIndex)
+			} else {
+				rl.ToggleFullscreen()
 			}
 		}
 
