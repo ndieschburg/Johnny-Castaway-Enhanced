@@ -104,12 +104,39 @@ func setupMonitors() {
 		// framebuffer, so size-dependent setup done later (e.g. the
 		// widescreen virtual canvas width) sees the final size and not the
 		// initial 640x480 one.
+		//
+		// xdg fullscreen is only a request: GLFW's monitor switch sends
+		// unset_fullscreen followed by set_fullscreen, and a race with
+		// compositor-side window rules can leave the last applied state
+		// windowed (a black partial-screen window on multi-monitor runs).
+		// Verify the window really covers its target monitor and re-issue
+		// the whole request sequence when it does not: the renderer checks
+		// the actual framebuffer size, which is the only ground truth a
+		// Wayland client can read back.
 		targetW := rl.GetMonitorWidth(monitor)
 		targetH := rl.GetMonitorHeight(monitor)
-		for i := 0; i < 150; i++ {
-			pumpFrame()
-			if rl.GetRenderWidth() >= targetW-8 && rl.GetRenderHeight() >= targetH-8 {
+		for attempt := 0; attempt < 5; attempt++ {
+			converged := false
+			for i := 0; i < 100; i++ {
+				pumpFrame()
+				if rl.GetRenderWidth() >= targetW-8 && rl.GetRenderHeight() >= targetH-8 {
+					converged = true
+					break
+				}
+			}
+			if converged {
 				break
+			}
+
+			// Not covering the target monitor: re-request fullscreen.
+			// Toggle back to windowed first so raylib and GLFW reset their
+			// fullscreen bookkeeping, then fullscreen again and switch to
+			// the target monitor (the switch sends a fresh
+			// set_fullscreen(output) request for that monitor).
+			rl.ToggleFullscreen()
+			rl.ToggleFullscreen()
+			if hasMonitorIndex {
+				rl.SetWindowMonitor(runOnMonitorIndex)
 			}
 		}
 
