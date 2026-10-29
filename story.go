@@ -40,23 +40,26 @@ func storyPickScene(wantedFlags uint16, unwantedFlags uint16) *TStoryScene {
 	return &storyScenes[scenes[rand.Intn(numScenes)]]
 }
 
-func storyUpdateCurrentDay() {
-	today := getDayOfYear()
+func updateStoryDay(config *TConfig, today int) bool {
 	hasChanged := false
 
-	if today != activeConfig.CurrentDate {
+	if today != config.CurrentDate {
 		fmt.Println("System date has changed since last sequence -> next day of the story")
-		activeConfig.CurrentDate = today
-		activeConfig.CurrentDay += 1
+		config.CurrentDate = today
+		config.CurrentDay += 1
 		hasChanged = true
 	}
 
-	if activeConfig.CurrentDay < 1 || activeConfig.CurrentDay > 11 {
-		activeConfig.CurrentDay = 1
+	if config.CurrentDay < 1 || config.CurrentDay > 11 {
+		config.CurrentDay = 1
 		hasChanged = true
 	}
 
-	if hasChanged {
+	return hasChanged
+}
+
+func storyUpdateCurrentDay() {
+	if updateStoryDay(&activeConfig, getDayOfYear()) && !isChildProcess {
 		cfgFileWrite(&activeConfig)
 	}
 
@@ -64,16 +67,24 @@ func storyUpdateCurrentDay() {
 	fmt.Printf("The day of the story is: %d\n", storyCurrentDay)
 }
 
-func storyCalculateIslandFromDateAndTime() {
-	// Night ?
-	hour := getHour()
+func storyCalculateNightFromHour(hour int) {
+	// Always derive a fresh state from the current hour. Without the daytime
+	// assignment, a previous nighttime calculation could leave the island
+	// stuck at night after the clock crossed into daytime.
 	if hour < 6 || hour >= 18 {
 		islandState.night = 1
+	} else {
+		islandState.night = 0
 	}
+
 	// A forced day/night (-d/-n) overrides the hour-derived mode.
 	if forcedNight >= 0 {
 		islandState.night = forcedNight
 	}
+}
+
+func storyCalculateIslandFromDateAndTime() {
+	storyCalculateNightFromHour(getHour())
 
 	// Holidays ?
 	islandState.holiday = 0

@@ -23,12 +23,20 @@ import (
 // If the compositor has no wlr-layer-shell support, GLFW falls back to the
 // regular xdg toplevel path, i.e. the previous fullscreen behavior.
 
+// waylandSessionEnv reports a Wayland session from the environment alone.
+// Unlike isWaylandSession() - which queries GLFW's platform and therefore
+// requires an initialized GLFW - it is safe to call before rl.InitWindow,
+// where the layer-shell mode has to be armed.
+func waylandSessionEnv() bool {
+	return os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
+}
+
 // enableLayerShellMode arms the layer-shell window mode for the screensaver
 // window. Must run before rl.InitWindow; only the screensaver mode uses it,
 // and the throwaway monitor-count window opened by getMonitorCount() in the
 // multi-instance parent never sees it.
 func enableLayerShellMode() {
-	if !isScreensaverMode || !isWaylandSession() {
+	if !isScreensaverMode || !waylandSessionEnv() {
 		return
 	}
 	_ = os.Setenv("GLFW_WLR_LAYER_SHELL", "1")

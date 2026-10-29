@@ -6,6 +6,36 @@ The ultimate goal of this fork is to add key enhancements, resolve bugs, and mak
 
 ---
 
+## ✨ Recent Improvements
+
+Recent updates focus on visual fidelity, stability, and compatibility while preserving the behavior of the original screensaver:
+
+- **More faithful animations:** Fixed scene transitions, sprite layering, persistent background decorations, and positioning in several story sequences, including planes, boats, and island interactions.
+- **Improved widescreen rendering:** Refined how moving vehicles, characters, lines, and clipping regions scale together, reducing gaps, jitter, and misplaced graphics.
+- **More reliable screensaver lifecycle:** Improved cleanup and display power-transition handling on Windows, including HDR-related recovery behavior when monitors sleep or wake.
+- **Multi-monitor and Linux improvements:** Refined monitor selection and independent instances, with platform-specific behavior for Windows, X11, and Wayland.
+- **Engine reliability:** Improved ADS/TTM scene and thread handling, resource cleanup, and automated regression coverage.
+
+For the complete list of features and technical details, see the sections below. Experimental changes in unmerged pull requests are not included in this overview.
+
+## 📚 Guide
+
+- [Recent improvements](#-recent-improvements)
+- [Getting started](#-getting-started)
+- [Linux support](#-linux-support-wayland--x11)
+- [Features and fixes](#-features-and-fixes)
+- [Original project details and credits](#-original-project-details--credits)
+
+---
+
+## ▶️ Getting Started
+
+On Windows, run `JohnnyCastaway.exe` to watch the animation or use `JohnnyCastaway.scr` as a Windows screensaver. Run the screensaver with `/c` to open its configuration window. The `/s` switch launches standard screensaver mode; `/t` and `/k` are intended for testing and debugging. See [Screensaver Controls and Lifecycle](#️-screensaver-controls-and-lifecycle) for the complete options and command-line flags.
+
+The original game resource files are required; this repository documents the engine and its improvements, not a redistribution of copyrighted original assets. Consult the original project and its licensing terms before obtaining or using any game resources.
+
+---
+
 ## 🐧 Linux Support (Wayland & X11)
 
 The project also builds and runs natively on Linux:
@@ -25,11 +55,11 @@ make build        # produces ./JohnnyCastaway2026 (requires Go and a C toolchain
 
 ---
 
-## 🚀 Improvements & Fixes in this Fork
+## 📖 Features and Fixes
 
-Here are the enhancements and fixes implemented in this version:
+The following sections document implemented features and fixes, including technical details for contributors:
 
-### 🖥️ Windows Screensaver & Lifecycle
+### 🖥️ Screensaver Controls and Lifecycle
 * **Options Dialog (`/c`)**: Implemented a Raylib-based screensaver configuration window (600x520) for setting options (Sound, Silent Time with custom quiet hours interval, Load Background, Widescreen, Scaling Filter, Password Protection, Software OpenGL, "Start of Day" time setting, and Independent instances). Preferences are saved persistently to `%USERPROFILE%\.johnny_castaway_2026`.
 * **Silent Time Schedule**: Added a configurable "Silent Time" mode. Users can set a custom quiet hours interval (e.g. from 22:00 to 07:00). During silent time, the screensaver runs uninterrupted while automatically muting all sound effects. Supports intraday intervals as well as overnight schedules spanning midnight.
 * **Quiet Preview Mode (`/p`)**: Handled screensaver preview calls by exiting cleanly and quietly.
@@ -46,7 +76,7 @@ Here are the enhancements and fixes implemented in this version:
   * **Escape**: Exit the screensaver/application cleanly.
 * **Render Benchmark Mode (`/b` or `-b`)**: Ported the performance test logic from the original `bench.c` in `jc_reborn`. It executes three timed passes of 3 seconds each to benchmark rendering 1, 4, and 8 concurrent compositing sprite layers on screen. Benchmark results are printed to the console, saved to `bench.log`, and rendered directly on screen across all active display viewports.
 * **Default Launch Mode (No flags)**: When double-clicked or run without command-line flags, the screensaver now defaults to screensaver mode (spanning all monitors), but ignores general key presses to prevent accidental exits. In this default watch mode, only the **Escape** key (and mouse movement/clicks) will close the screensaver. Standard Windows screensaver launches using **`/s`** retain the normal "any key exits" screensaver behavior.
-* **Graceful Exit & Display/HDR Cleanup**: Replaced direct hard-kills (`os.Exit`) with state-controlled cleanup flags. This ensures proper teardown, cleanly restoring desktop resolution and HDR display states on exit. Added an automatic HDR watchdog (`startHDRWatchdog()`) on Windows that listens for `WM_POWERBROADCAST` monitor resume events (`PBT_APMRESUMEAUTOMATIC` / `PBT_APMRESUMESUSPEND`) to trigger `ChangeDisplaySettingsW(nil, 0)` when displays wake up, forcing the GPU driver to re-initialize HDR tone mapping after monitor sleep.
+* **Graceful Exit & Display/HDR Cleanup**: Uses state-controlled shutdown and orderly Raylib/GLFW resource cleanup instead of abruptly terminating the screensaver. On Windows, the screensaver monitors `GUID_CONSOLE_DISPLAY_STATE` notifications and exits gracefully when a display transitions to dimmed (`2`) or off (`0`). This prevents rendering from continuing through monitor power transitions, reducing the risk of HDR color corruption when displays wake up. The existing HDR resume watchdog remains available as an additional recovery mechanism. In independent multi-monitor mode, the normal parent-child shutdown coordination ensures that all instances terminate cleanly.
 * **Console Window Management**: Hides the background console window when launching the application as a screensaver.
 * **Window Flags Cleanup**: Removed unnecessary topmost window flag (`FlagWindowTopmost`) and added resizable flag (`FlagWindowResizable`) to allow proper Windows focus, screensaver lifecycle handling, and window minimization.
 
@@ -88,7 +118,7 @@ Here are the enhancements and fixes implemented in this version:
   * **WOULDBE.TTM widescreen & ladder alignment**: `WOULDBE.TTM` is marked screen-spanning so the boat hull (`BOAT.BMP`, slot 4) and passengers (`WOULDBE.BMP`, slot 2) scale continuously with a single rigid anchor across all arrival, parked, and drive-off tags. To keep Johnny aligned with the boat ladder during interactions without shifting static island poses, slot 3 poses are classified dynamically: Johnny swimming to/reaching the boat (`JOHNWOUL.BMP` sprites 6..16) and climbing the boat ladder (`DRUNKJON.BMP` sprites 16..22) scale with the boat anchor, while static island poses (sitting under the tree, staggering on the island) remain shifted by `widescreenOffsetX`.
   * **Widescreen Clip Zone & Line Edge Pinning**: Many TTM scripts (e.g. `MJFISHC.TTM` shark-drag sequence, `FISHWALK`, `GJDIVE`, `MJDIVE`, `MJSAND`) specify `SET_CLIP_ZONE` bounds or `DRAW_LINE` endpoints with `x1 <= 0` or `x2 >= 639` to indicate unconstrained drawing up to the screen boundary. In widescreen mode, applying a standard `widescreenOffsetX` shift centered those 640px bounds within the wider viewport, inadvertently clipping lines and off-screen sprite animations (such as the shark dragging Johnny) at the original 4:3 boundary instead of allowing them to extend to the actual edge of the screen. Updated `grSetClipZone` and `grDrawLine` to pin endpoints touching `0` or `639` to the true canvas edges (`0` and `virtualWidth - 1`) when widescreen mode is enabled.
 
-### ⚙️ Engine, Scripts, and RNG
+### ⚙️ Animation Engine and Scripts
 * **Plane Visitor Duplicate Rendering**: Resolved a race condition where Johnny would duplicate/ghost in the plane visitor scene (`VISITOR.ADS` tag 5) by updating the interpreter's active thread tag (`ttmThread.sceneTag`) dynamically upon hitting tag markers (`0x1111` or `0x1101`), and stopping active walk/stand threads (`tag 7`, `8`, or `10`) concurrently.
 * **MARY.ADS Tag 3 Ghosting / Stalled Exit**: Fixed a scene-control bug where ADS thread ownership checks were matching against the live TTM tag even after a scene entered a `:LOCAL_TAG` loop. Threads now retain their original `ADD_SCENE` tag separately from the current execution tag, so `STOP_SCENE`, `IF_IS_RUNNING`, replay handling, and `IF_LASTPLAYED` dispatch continue to target the correct scene. This resolves the MARY 3 ghost-sprite buildup and the scene getting stuck before its ending transition.
 * **TIMER Opcode RNG**: Fixed the `TIMER` opcode (`0x2022`) to sample uniformly from the target range `[args[0], args[1]]` (instead of taking the static average), restoring the natural jitter/timing variation of the original screensaver.

@@ -133,12 +133,40 @@ type TTags struct {
 	Description string
 }
 
+func readCompressedSize(buf *bytes.Reader) uint32 {
+	size := readUint32(buf)
+	if size < 5 {
+		panic(fmt.Sprintf("invalid compressed block size: %d", size))
+	}
+	return size - 5
+}
+
+func readVersionString(buf *bytes.Reader, size uint32) string {
+	if size < 4 || uint64(size) > uint64(buf.Len()) {
+		panic(fmt.Sprintf("invalid version string size: %d", size))
+	}
+	return string(readUint8Block(buf, int(size))[:4])
+}
+
+func validateEntryCount(count int, availableBytes int, minEntryBytes int, name string) {
+	if minEntryBytes <= 0 || count < 0 || count > availableBytes/minEntryBytes {
+		panic(fmt.Sprintf("%s count %d cannot fit in %d bytes", name, count, availableBytes))
+	}
+}
+
+func readSizedBlock(buf *bytes.Reader, size uint32, name string) *bytes.Reader {
+	if uint64(size) > uint64(buf.Len()) {
+		panic(fmt.Sprintf("invalid %s size: %d exceeds %d remaining bytes", name, size, buf.Len()))
+	}
+	return bytes.NewReader(readUint8Block(buf, int(size)))
+}
+
 func parseTTMResource(buf *bytes.Reader) TTTMResource {
 	ttmResource := TTTMResource{}
 
 	readTag(buf, "VER:")
 	ttmResource.VersionSize = readUint32(buf)
-	ttmResource.VersionString = string(readUint8Block(buf, int(ttmResource.VersionSize))[0:4])
+	ttmResource.VersionString = readVersionString(buf, ttmResource.VersionSize)
 
 	readTag(buf, "PAG:")
 	ttmResource.NumPages = readUint32(buf)
@@ -146,7 +174,7 @@ func parseTTMResource(buf *bytes.Reader) TTTMResource {
 	ttmResource.PagUnknown2 = readUint8(buf)
 
 	readTag(buf, "TT3:")
-	ttmResource.CompressedSize = readUint32(buf) - 5
+	ttmResource.CompressedSize = readCompressedSize(buf)
 	ttmResource.CompressionMethod = readUint8(buf)
 	ttmResource.UncompressedSize = readUint32(buf)
 	ttmResource.UncompressedData = uncompress(
@@ -164,12 +192,19 @@ func parseTTMResource(buf *bytes.Reader) TTTMResource {
 
 	readTag(buf, "TAG:")
 	ttmResource.TagSize = readUint32(buf)
-	ttmResource.NumTags = readUint16(buf)
-
+	if ttmResource.TagSize < 2 {
+		panic(fmt.Sprintf("invalid TAG block size: %d", ttmResource.TagSize))
+	}
+	tagBlock := readSizedBlock(buf, ttmResource.TagSize, "TAG block")
+	ttmResource.NumTags = readUint16(tagBlock)
+	validateEntryCount(int(ttmResource.NumTags), tagBlock.Len(), 3, "TAG")
 	ttmResource.Tags = make([]TTags, ttmResource.NumTags)
-	for i := 0; i < len(ttmResource.Tags); i++ {
-		ttmResource.Tags[i].ID = readUint16(buf)
-		ttmResource.Tags[i].Description = getString(buf, 40)
+	for i := range ttmResource.Tags {
+		if tagBlock.Len() < 3 {
+			panic(fmt.Sprintf("truncated TAG entry %d", i))
+		}
+		ttmResource.Tags[i].ID = readUint16(tagBlock)
+		ttmResource.Tags[i].Description = getString(tagBlock, 40)
 	}
 
 	return ttmResource
@@ -180,12 +215,8 @@ func parseAdsResource(buf *bytes.Reader) TAdsResource {
 
 	readTag(buf, "VER:")
 	res.VersionSize = readUint32(buf)
-	tempVersionString := make([]uint8, res.VersionSize)
-	err := binary.Read(buf, binary.LittleEndian, tempVersionString)
-	if err != nil {
-		panic(fmt.Errorf("binary.Read: %w", err))
-	}
-	res.VersionString = string(tempVersionString[0:4])
+	res.VersionString = readVersionString(buf, res.VersionSize)
+	var err error
 
 	readTag(buf, "ADS:")
 	err = binary.Read(buf, binary.LittleEndian, res.AdsUnknown[:])
@@ -197,33 +228,28 @@ func parseAdsResource(buf *bytes.Reader) TAdsResource {
 	res.ResSize = readUint32(buf)
 	res.NumRes = readUint16(buf)
 
+	if res.ResSize < 2 {
+		panic(fmt.Sprintf("invalid ADS RES size: %d", res.ResSize))
+	}
+	resBlock := readSizedBlock(buf, res.ResSize-2, "ADS RES block")
+	validateEntryCount(int(res.NumRes), resBlock.Len(), 3, "ADS RES")
 	res.Res = make([]TAdsRes, res.NumRes)
 	// In original Screen Antics resources, ADS RES entries are stored as
 	// (uint16 id + null-terminated name) with variable name length, not fixed
-	// 40-byte records. Reading fixed-width names misaligns the stream and causes
-	// wrong slot->TTM mappings for some ADS scripts (notably JOHNNY.ADS).
-	resBytesRead := uint32(0)
-	for i := 0; i < int(res.NumRes) && resBytesRead < res.ResSize-2; i++ {
-		res.Res[i].ID = readUint16(buf)
-		resBytesRead += 2
-
-		nameBytes := make([]byte, 0, 32)
-		for {
-			b, err := buf.ReadByte()
-			if err != nil {
-				break
-			}
-			resBytesRead++
-			if b == 0 {
-				break
-			}
-			nameBytes = append(nameBytes, b)
+	// 40-byte records. Keep every entry confined to the declared RES block.
+	for i := range res.Res {
+		if resBlock.Len() < 3 {
+			panic(fmt.Sprintf("truncated ADS RES entry %d", i))
 		}
-		res.Res[i].Name = string(nameBytes)
+		res.Res[i].ID = readUint16(resBlock)
+		if int(res.Res[i].ID) >= MaxTTMSlots {
+			panic(fmt.Sprintf("ADS RES slot %d exceeds runtime capacity %d", res.Res[i].ID, MaxTTMSlots))
+		}
+		res.Res[i].Name = getString(resBlock, resBlock.Len())
 	}
 
 	readTag(buf, "SCR:")
-	res.CompressedSize = readUint32(buf) - 5
+	res.CompressedSize = readCompressedSize(buf)
 	res.CompressionMethod = readUint8(buf)
 	res.UncompressedSize = readUint32(buf)
 	res.UncompressedData = uncompress(
@@ -235,12 +261,19 @@ func parseAdsResource(buf *bytes.Reader) TAdsResource {
 
 	readTag(buf, "TAG:")
 	res.TagSize = readUint32(buf)
-	res.NumTags = readUint16(buf)
-
+	if res.TagSize < 2 {
+		panic(fmt.Sprintf("invalid TAG block size: %d", res.TagSize))
+	}
+	tagBlock := readSizedBlock(buf, res.TagSize, "TAG block")
+	res.NumTags = readUint16(tagBlock)
+	validateEntryCount(int(res.NumTags), tagBlock.Len(), 3, "TAG")
 	res.Tags = make([]TTags, res.NumTags)
-	for i := 0; i < int(res.NumTags); i++ {
-		res.Tags[i].ID = readUint16(buf)
-		res.Tags[i].Description = getString(buf, 40)
+	for i := range res.Tags {
+		if tagBlock.Len() < 3 {
+			panic(fmt.Sprintf("truncated TAG entry %d", i))
+		}
+		res.Tags[i].ID = readUint16(tagBlock)
+		res.Tags[i].Description = getString(tagBlock, 40)
 	}
 
 	return res
@@ -256,12 +289,16 @@ func parseBPMResource(buf *bytes.Reader) TBMPResource {
 	readTag(buf, "INF:")
 	res.DataSize = readUint32(buf)
 	res.NumImages = readUint16(buf)
+	validateEntryCount(int(res.NumImages), buf.Len(), 4, "BMP image dimensions")
+	if int(res.NumImages) > MaxSpritesPerBMP {
+		panic(fmt.Sprintf("BMP image count %d exceeds runtime capacity %d", res.NumImages, MaxSpritesPerBMP))
+	}
 
 	res.Widths = readUint16Block(buf, int(res.NumImages))
 	res.Heights = readUint16Block(buf, int(res.NumImages))
 
 	readTag(buf, "BIN:")
-	res.CompressedSize = readUint32(buf) - 5
+	res.CompressedSize = readCompressedSize(buf)
 	res.CompressionMethod = readUint8(buf)
 	res.UncompressedSize = readUint32(buf)
 
@@ -313,7 +350,7 @@ func parseScrResource(buf *bytes.Reader) TSCRResource {
 	res.Height = readUint16(buf)
 
 	readTag(buf, "BIN:")
-	res.CompressedSize = readUint32(buf) - 5
+	res.CompressedSize = readCompressedSize(buf)
 	res.CompressionMethod = readUint8(buf)
 	res.UncompressedSize = readUint32(buf)
 
@@ -346,6 +383,7 @@ func parseMapFile(filename string) *TMapFile {
 	mapFile.resFilename = strings.TrimRight(string(tempFilename[0:12]), "\x00 ")
 
 	mapFile.numEntries = readUint16(buf)
+	validateEntryCount(int(mapFile.numEntries), buf.Len(), 8, "resource map entry")
 	mapFile.entries = make([]TMapFileEntry, int(mapFile.numEntries))
 	for i := 0; i < len(mapFile.entries); i++ {
 		mapFile.entries[i].length = readUint32(buf)
@@ -355,15 +393,30 @@ func parseMapFile(filename string) *TMapFile {
 	return &mapFile
 }
 
+func resourceEntryData(b []byte, entries []TMapFileEntry, i int) ([]byte, bool) {
+	if i < 0 || i >= len(entries) {
+		return nil, false
+	}
+	start := uint64(entries[i].offset)
+	end := uint64(len(b))
+	if i+1 < len(entries) {
+		end = uint64(entries[i+1].offset)
+	}
+	if start > uint64(len(b)) || end > uint64(len(b)) || end <= start || end-start < 17 {
+		return nil, false
+	}
+	return b[int(start):int(end)], true
+}
+
 func parseResourceFile(filename string, mapFile *TMapFile) {
 	b := embeddedRes
 
 	for i := 0; i < len(mapFile.entries); i++ {
-		if int(mapFile.entries[i].offset)+17 > len(b) {
-			fmt.Printf("Skipping entry %d: offset %d out of range\n", i, mapFile.entries[i].offset)
+		seekedBuffer, ok := resourceEntryData(b, mapFile.entries, i)
+		if !ok {
+			fmt.Printf("Skipping entry %d: invalid resource bounds at offset %d\n", i, mapFile.entries[i].offset)
 			continue
 		}
-		seekedBuffer := b[mapFile.entries[i].offset:]
 
 		tempFilename := make([]uint8, 13)
 		buf := bytes.NewReader(seekedBuffer)
@@ -392,22 +445,42 @@ func parseResourceFile(filename string, mapFile *TMapFile) {
 
 		switch resType {
 		case ".ADS":
+			if numAdsResources >= len(adsResources) {
+				fmt.Printf("Skipping %s: too many ADS resources\n", resName)
+				continue
+			}
 			adsResources[numAdsResources] = parseAdsResource(buf)
 			adsResources[numAdsResources].ResName = resName
 			numAdsResources += 1
 		case ".BMP":
+			if numBmpResources >= len(bmpResources) {
+				fmt.Printf("Skipping %s: too many BMP resources\n", resName)
+				continue
+			}
 			bmpResources[numBmpResources] = parseBPMResource(buf)
 			bmpResources[numBmpResources].ResName = resName
 			numBmpResources += 1
 		case ".PAL":
+			if numPalResources >= len(palResources) {
+				fmt.Printf("Skipping %s: too many PAL resources\n", resName)
+				continue
+			}
 			palResources[numPalResources] = parsePalResource(buf)
 			palResources[numPalResources].ResName = resName
 			numPalResources += 1
 		case ".SCR":
+			if numScrResources >= len(scrResources) {
+				fmt.Printf("Skipping %s: too many SCR resources\n", resName)
+				continue
+			}
 			scrResources[numScrResources] = parseScrResource(buf)
 			scrResources[numScrResources].ResName = resName
 			numScrResources += 1
 		case ".TTM":
+			if numTtmResources >= len(ttmResources) {
+				fmt.Printf("Skipping %s: too many TTM resources\n", resName)
+				continue
+			}
 			ttmResources[numTtmResources] = parseTTMResource(buf)
 			ttmResources[numTtmResources].ResName = resName
 			numTtmResources += 1

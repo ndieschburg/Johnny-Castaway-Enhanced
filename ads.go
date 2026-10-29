@@ -137,88 +137,57 @@ type TAdsRandOp struct {
 	weight   uint16
 }
 
+func readADSWords(data []byte, dataSize uint32, offset *uint32, dest []uint16, count int) bool {
+	if uint64(dataSize) > uint64(len(data)) || *offset > dataSize {
+		return false
+	}
+	need := uint32(count) * 2
+	if need > dataSize-*offset || count > len(dest) {
+		return false
+	}
+	peekUint16Block(data, offset, dest, count)
+	return true
+}
+
 func adsLoad(data []byte, dataSize uint32, numTags uint16, tag uint16, tagOffset *uint32) {
-	var offset uint32 = 0
+	var offset uint32
 	var args [10]uint16
-	var bookmarkingChunks = 0
-	var bookmarkingIfNotRunnings = 0
+	bookmarkingChunks := 0
+	bookmarkingIfNotRunnings := 0
 
 	numAdsChunks = 0
 	numAdsChunksLocal = 0
 	*tagOffset = 0
 	adsNumTags = 0
-	adsTags = make([]TTtmTag, numTags)
+	adsTags = make([]TTtmTag, 0, numTags)
 
 	for offset < dataSize {
-		opCode := peekUint16(data, &offset)
-
+		var op [1]uint16
+		if !readADSWords(data, dataSize, &offset, op[:], 1) {
+			fmt.Printf("WARN: truncated ADS opcode at offset %d\n", offset)
+			break
+		}
+		opCode := op[0]
+		argWords := 0
 		switch opCode {
-		case 0x1350: // IF_LASTPLAYED
-			if bookmarkingChunks != 0 {
-				bookmarkingIfNotRunnings = 0
-				peekUint16Block(data, &offset, args[:], 2)
-				adsChunks[numAdsChunks].scene.slot = args[0]
-				adsChunks[numAdsChunks].scene.tag = args[1]
-				adsChunks[numAdsChunks].offset = offset
-				numAdsChunks++
-			} else {
-				offset += 2 << 1
-			}
-		case 0x1360: // IF_NOT_RUNNING
-			// We only bookmark the IF_NOT_RUNNINGs
-			// preceding the first IF_LAST_PLAYED or IF_IS_RUNNING
-
-			if bookmarkingChunks != 0 && bookmarkingIfNotRunnings != 0 {
-				peekUint16Block(data, &offset, args[:], 2)
-				adsChunks[numAdsChunks].scene.slot = args[0]
-				adsChunks[numAdsChunks].scene.tag = args[1]
-				adsChunks[numAdsChunks].offset = offset
-				numAdsChunks++
-			} else {
-				offset += 2 << 1
-			}
-		case 0x1370: // IF_IS_RUNNING
-			bookmarkingIfNotRunnings = 0
-			offset += 2 << 1
-		case 0x1070:
-			offset += 2 << 1
-		case 0x1330:
-			offset += 2 << 1
-		case 0x1420:
-			offset += 0 << 1
-		case 0x1430:
-			offset += 0 << 1
-			// OR   // TODO : manage here if_lastplayed OK tags ?
-		case 0x1510:
-			offset += 0 << 1
+		case 0x1350, 0x1360, 0x1370, 0x1070, 0x1330:
+			argWords = 2
 		case 0x1520:
-			offset += 5 << 1
+			argWords = 5
 		case 0x2005:
-			offset += 4 << 1
-		case 0x2010:
-			offset += 3 << 1
-		case 0x2014:
-			offset += 0 << 1
-		case 0x3010:
-			offset += 0 << 1
-		case 0x3020:
-			offset += 1 << 1
-		case 0x30ff:
-			offset += 0 << 1
-		case 0x4000:
-			offset += 3 << 1
-		case 0xf010:
-			offset += 0 << 1
-		case 0xf200:
-			offset += 1 << 1
-		case 0xffff:
-			offset += 0 << 1
-		case 0xfff0:
-			offset += 0 << 1
+			argWords = 4
+		case 0x2010, 0x4000:
+			argWords = 3
+		case 0x3020, 0xf200:
+			argWords = 1
+		case 0x1420, 0x1430, 0x1510, 0x2014, 0x3010, 0x30ff, 0xf010, 0xffff, 0xfff0:
 		default:
-			adsTags[adsNumTags].id = opCode
-			adsTags[adsNumTags].offset = offset
-			adsNumTags++
+			if len(adsTags) >= int(numTags) {
+				fmt.Printf("WARN: ADS contains more tags than declared (%d)\n", numTags)
+				return
+			}
+			adsTags = append(adsTags, TTtmTag{id: opCode, offset: offset})
+			adsNumTags = len(adsTags)
 			if opCode == tag {
 				*tagOffset = offset
 				bookmarkingChunks = 1
@@ -227,17 +196,48 @@ func adsLoad(data []byte, dataSize uint32, numTags uint16, tag uint16, tagOffset
 				bookmarkingChunks = 0
 				bookmarkingIfNotRunnings = 0
 			}
+			continue
+		}
+
+		if !readADSWords(data, dataSize, &offset, args[:], argWords) {
+			fmt.Printf("WARN: truncated ADS arguments for opcode %04x\n", opCode)
+			break
+		}
+		switch opCode {
+		case 0x1350:
+			if bookmarkingChunks != 0 {
+				bookmarkingIfNotRunnings = 0
+				if numAdsChunks >= len(adsChunks) {
+					fmt.Println("WARN: too many ADS chunks")
+					return
+				}
+				adsChunks[numAdsChunks].scene.slot = args[0]
+				adsChunks[numAdsChunks].scene.tag = args[1]
+				adsChunks[numAdsChunks].offset = offset
+				numAdsChunks++
+			}
+		case 0x1360:
+			if bookmarkingChunks != 0 && bookmarkingIfNotRunnings != 0 {
+				if numAdsChunks >= len(adsChunks) {
+					fmt.Println("WARN: too many ADS chunks")
+					return
+				}
+				adsChunks[numAdsChunks].scene.slot = args[0]
+				adsChunks[numAdsChunks].scene.tag = args[1]
+				adsChunks[numAdsChunks].offset = offset
+				numAdsChunks++
+			}
+		case 0x1370:
+			bookmarkingIfNotRunnings = 0
 		}
 	}
 
 	if adsNumTags != int(numTags) {
 		fmt.Println("WARN: didn't find every tag in ADS data")
 	}
-
 	if *tagOffset == 0 {
 		fmt.Printf("WARN: ADS tag %d not found, starting from offset 0\n", tag)
 	}
-
 }
 
 func adsReleaseAds() {
@@ -245,6 +245,11 @@ func adsReleaseAds() {
 }
 
 func adsFindTag(reqdTag uint16) uint32 {
+	result, _ := adsLookupTag(reqdTag)
+	return result
+}
+
+func adsLookupTag(reqdTag uint16) (uint32, bool) {
 	var result uint32 = 0
 	i := 0
 
@@ -258,11 +263,24 @@ func adsFindTag(reqdTag uint16) uint32 {
 
 	if result == 0 {
 		fmt.Printf("WARN: ADS tag %d not found, returning offset 0000\n", reqdTag)
+		return 0, false
 	}
-	return result
+	return result, true
+}
+
+func adsSceneTimer(arg uint16) int32 {
+	signed := int32(int16(arg))
+	if signed < 0 {
+		return -signed
+	}
+	return 0
 }
 
 func adsAddScene(ttmSlotNo, ttmTag, arg3 uint16) {
+	if int(ttmSlotNo) >= len(ttmSlots) {
+		fmt.Printf("WARN: TTM slot %d out of range - didn't add scene\n", ttmSlotNo)
+		return
+	}
 	for i := 0; i < MaxTTMThreads; i++ {
 		ttmThread := &ttmThreads[i]
 
@@ -275,8 +293,12 @@ func adsAddScene(ttmSlotNo, ttmTag, arg3 uint16) {
 	}
 
 	i := 0
-	for ttmThreads[i].isRunning != 0 {
+	for i < len(ttmThreads) && ttmThreads[i].isRunning != 0 {
 		i++
+	}
+	if i >= len(ttmThreads) {
+		fmt.Println("WARN: no free TTM thread - didn't add scene")
+		return
 	}
 
 	ttmThread := &ttmThreads[i]
@@ -307,8 +329,8 @@ func adsAddScene(ttmSlotNo, ttmTag, arg3 uint16) {
 		ttmThread.ip = 0
 	}
 
-	if int16(arg3) < 0 {
-		ttmThread.sceneTimer = -(int16(arg3))
+	if timer := adsSceneTimer(arg3); timer > 0 {
+		ttmThread.sceneTimer = timer
 	} else if int16(arg3) > 0 {
 		ttmThread.sceneIterations = arg3 - 1
 	}
@@ -329,6 +351,9 @@ func adsAddScene(ttmSlotNo, ttmTag, arg3 uint16) {
 }
 
 func adsStopScene(sceneNo int, keepAsDecoration bool) {
+	if sceneNo < 0 || sceneNo >= len(ttmThreads) || ttmThreads[sceneNo].isRunning == 0 {
+		return
+	}
 	_ = keepAsDecoration
 	if shouldFreezeOnStop(ttmThreads[sceneNo].sceneSlot, ttmThreads[sceneNo].sceneRootTag) {
 		// r.c. - TEMP: -t test mode keeps landing on a run where the ship's
@@ -348,7 +373,10 @@ func adsStopScene(sceneNo int, keepAsDecoration bool) {
 			grRedrawMostCommonSettledSpriteToBg(&ttmThreads[sceneNo])
 		}
 	}
-	grFreeLayer(ttmThreads[sceneNo].ttmLayer)
+	if ttmThreads[sceneNo].ttmLayer != nil {
+		grFreeLayer(ttmThreads[sceneNo].ttmLayer)
+		ttmThreads[sceneNo].ttmLayer = nil
+	}
 	ttmThreads[sceneNo].isRunning = 0
 	numThreads--
 }
@@ -393,6 +421,10 @@ func adsRandomPickOp() *TAdsRandOp {
 		totalWeight += int(adsRandOps[i].weight)
 	}
 
+	if totalWeight <= 0 {
+		return nil
+	}
+
 	a := rand.Intn(totalWeight)
 
 	for res = 0; res < adsNumRandOps; res++ {
@@ -409,6 +441,10 @@ func adsRandomStart() {
 }
 
 func adsRandomAddScene(ttmSlotNo, ttmTag, numPlays, weight uint16) {
+	if adsNumRandOps >= len(adsRandOps) {
+		debugPrintln("WARN: too many ADS random operations")
+		return
+	}
 	adsRandOps[adsNumRandOps].ttype = OP_ADD_SCENE
 	adsRandOps[adsNumRandOps].slot = ttmSlotNo
 	adsRandOps[adsNumRandOps].tag = ttmTag
@@ -418,6 +454,10 @@ func adsRandomAddScene(ttmSlotNo, ttmTag, numPlays, weight uint16) {
 }
 
 func adsRandomStopSceneByTtmTag(ttmSlotNo, ttmTag, weight uint16) {
+	if adsNumRandOps >= len(adsRandOps) {
+		debugPrintln("WARN: too many ADS random operations")
+		return
+	}
 	adsRandOps[adsNumRandOps].ttype = OP_STOP_SCENE
 	adsRandOps[adsNumRandOps].slot = ttmSlotNo
 	adsRandOps[adsNumRandOps].tag = ttmTag
@@ -427,6 +467,10 @@ func adsRandomStopSceneByTtmTag(ttmSlotNo, ttmTag, weight uint16) {
 }
 
 func adsRandomNop(weight uint16) {
+	if adsNumRandOps >= len(adsRandOps) {
+		debugPrintln("WARN: too many ADS random operations")
+		return
+	}
 	adsRandOps[adsNumRandOps].ttype = OP_NOP
 	adsRandOps[adsNumRandOps].slot = 0
 	adsRandOps[adsNumRandOps].tag = 0
@@ -438,6 +482,10 @@ func adsRandomNop(weight uint16) {
 func adsRandomEnd() {
 	if adsNumRandOps != 0 {
 		op := adsRandomPickOp()
+		if op == nil {
+			debugPrintln("RANDOM: total weight is zero")
+			return
+		}
 		switch op.ttype {
 		case OP_ADD_SCENE:
 			debugPrintf("RANDOM: chose ADD_SCENE %d %d...\n", op.slot, op.tag)
@@ -471,15 +519,22 @@ func adsInit() {
 	adsStopRequested = 0
 }
 
+func singleTtmShouldContinue(thread *TTtmThread, slot *TTtmSlot) bool {
+	return thread != nil && slot != nil && thread.isRunning == 1 && thread.ip < slot.dataSize
+}
+
 func adsPlaySingleTtm(ttmName string) {
 	adsInit()
 	ttmLoadTTM(&ttmSlots[0], ttmName)
 	adsAddScene(0, 0, 0)
+	defer func() {
+		adsStopScene(0, false)
+		ttmResetSlot(&ttmSlots[0])
+	}()
 	ttmThreads[0].ip = 0
 
-	for ttmThreads[0].ip < ttmSlots[0].dataSize {
+	for singleTtmShouldContinue(&ttmThreads[0], &ttmSlots[0]) {
 		ttmPlay(&ttmThreads[0])
-		ttmThreads[0].isRunning = 1
 		grUpdateDisplay(nil, ttmThreads[:], nil, nil)
 		if shouldExitApp {
 			return
@@ -487,8 +542,30 @@ func adsPlaySingleTtm(ttmName string) {
 		grUpdateDelay = int(ttmThreads[0].delay)
 	}
 
-	adsStopScene(0, false)
-	ttmResetSlot(&ttmSlots[0])
+}
+
+func decodeADSInstruction(data []byte, dataSize uint32, offset *uint32, args *[10]uint16) (uint16, error) {
+	var op [1]uint16
+	if !readADSWords(data, dataSize, offset, op[:], 1) {
+		return 0, fmt.Errorf("truncated opcode at offset %d", *offset)
+	}
+	argWords := 0
+	switch op[0] {
+	case 0x1070, 0x1330, 0x1350, 0x1360, 0x1370:
+		argWords = 2
+	case 0x1520:
+		argWords = 5
+	case 0x2005:
+		argWords = 4
+	case 0x2010, 0x4000:
+		argWords = 3
+	case 0x3020, 0xf200:
+		argWords = 1
+	}
+	if !readADSWords(data, dataSize, offset, args[:], argWords) {
+		return 0, fmt.Errorf("truncated arguments for opcode %04x", op[0])
+	}
+	return op[0], nil
 }
 
 func adsPlayChunk(data []byte, dataSize, offset uint32) {
@@ -503,16 +580,24 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 	)
 
 	for continueLoop != 0 && offset < dataSize {
-		opcode = peekUint16(data, &offset)
+		var err error
+		opcode, err = decodeADSInstruction(data, dataSize, &offset, &args)
+		if err != nil {
+			debugPrintf("WARN: malformed ADS instruction: %v\n", err)
+			break
+		}
 
 		switch opcode {
 
 		case 0x1070:
 			// Inside an IF_LASTPLAYED chunk, local IF_LASTPLAYED
 			// which overrides the global IF_LASTPLAYEDs.
-			peekUint16Block(data, &offset, args[:], 2)
 			debugPrintln("IF_LASTPLAYED_LOCAL")
 			inIfLastplayedLocal = 1
+			if numAdsChunksLocal >= len(adsChunksLocal) {
+				debugPrintln("WARN: too many local ADS chunks")
+				break
+			}
 			adsChunksLocal[numAdsChunksLocal].scene.slot = args[0]
 			adsChunksLocal[numAdsChunksLocal].scene.tag = args[1]
 			adsChunksLocal[numAdsChunksLocal].offset = offset
@@ -529,10 +614,8 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 			// scene whose exact (ttm, tag) thread is already running, so
 			// whether or not this opcode is treated as a real conditional,
 			// the resulting behavior is identical. Safe to keep ignoring it.
-			peekUint16Block(data, &offset, args[:], 2)
 			debugPrintf("IF_UNKNOWN_1 %d %d\n", args[0], args[1])
 		case 0x1350:
-			peekUint16Block(data, &offset, args[:], 2)
 			debugPrintf("IF_LASTPLAYED %d %d\n", args[0], args[1])
 			if inOrBlock == 0 {
 				continueLoop = 0
@@ -540,13 +623,11 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 
 			inOrBlock = 0
 		case 0x1360:
-			peekUint16Block(data, &offset, args[:], 2)
 			debugPrintf("IF_NOT_RUNNING %d %d\n", args[0], args[1])
 			if isSceneRunning(args[0], args[1]) != 0 {
 				inSkipBlock = 1
 			}
 		case 0x1370:
-			peekUint16Block(data, &offset, args[:], 2)
 			debugPrintf("IF_IS_RUNNING %d %d\n", args[0], args[1])
 			// r.c - possible bug fixed, the inSkipBlock = 0|1 were swapped originally
 			if isSceneRunning(args[0], args[1]) == 0 {
@@ -572,7 +653,6 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 			}
 		case 0x1520:
 			// Only in ACTIVITY.ADS tag 7, after IF_LASTPLAYED_LOCAL
-			peekUint16Block(data, &offset, args[:], 5)
 			debugPrintln("ADD_SCENE_LOCAL")
 			if inIfLastplayedLocal != 0 {
 				// First pass : the scene was queued by IF_LASTPLAYED_LOCAL,
@@ -584,7 +664,6 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 				adsAddScene(args[1], args[2], args[3])
 			}
 		case 0x2005:
-			peekUint16Block(data, &offset, args[:], 4)
 			debugPrintf("ADD_SCENE %d %d %d %d\n", args[0], args[1], args[2], args[3])
 			if inSkipBlock == 0 { // TODO - TEMPO
 				if inRandBlock != 0 {
@@ -594,7 +673,6 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 				}
 			}
 		case 0x2010:
-			peekUint16Block(data, &offset, args[:], 3)
 			debugPrintf("STOP_SCENE %d %d %d\n", args[0], args[1], args[2])
 			if inSkipBlock == 0 { // TODO - TEMPO
 				if inRandBlock != 0 {
@@ -608,7 +686,6 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 			adsRandomStart()
 			inRandBlock = 1
 		case 0x3020:
-			peekUint16Block(data, &offset, args[:], 1)
 			debugPrintln("NOP")
 			if inRandBlock != 0 {
 				adsRandomNop(args[0])
@@ -618,17 +695,17 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 			adsRandomEnd()
 			inRandBlock = 0
 		case 0x4000:
-			peekUint16Block(data, &offset, args[:], 3)
-			debugPrintln("UNKNOWN_6") // only in BUILDING.ADS tag 7
+			debugPrintln("UNKNOWN_6") // BUILDING.ADS tags 7 and 8, twice each; args (3,44,1)
 		case 0xf010:
 			debugPrintln("FADE_OUT")
 		case 0xf200:
-			peekUint16Block(data, &offset, args[:], 1)
 			debugPrintf("GOSUB_TAG %d\n", args[0]) // ex UNKNOWN_8
 			// "quick and dirty" implementation, sufficient for
 			// JCastaway : only encountered in STAND.ADS to tag 14
 			// which only contains 1 scene
-			adsPlayChunk(data, dataSize, adsFindTag(args[0]))
+			if target, ok := adsLookupTag(args[0]); ok {
+				adsPlayChunk(data, dataSize, target)
+			}
 		case 0xffff:
 			debugPrintln("END")
 			if inSkipBlock != 0 {
@@ -677,6 +754,25 @@ func adsPlayTriggeredChunks(data []byte, dataSize uint32, ttmSlotNo, ttmTag uint
 	}
 }
 
+// adsCleanupPlayback releases per-playback scene resources on both normal
+// completion and early application exit. Do not use adsStopScene here: it can
+// redraw persistent decorations while the display is shutting down.
+func adsCleanupPlayback() {
+	for i := range ttmThreads {
+		if ttmThreads[i].ttmLayer != nil {
+			grFreeLayer(ttmThreads[i].ttmLayer)
+			ttmThreads[i].ttmLayer = nil
+		}
+		ttmThreads[i].isRunning = 0
+	}
+	numThreads = 0
+	for i := 0; i < MaxTTMSlots; i++ {
+		ttmResetSlot(&ttmSlots[i])
+	}
+	grRestoreZone(nil, 0, 0, 0, 0)
+	adsReleaseAds()
+}
+
 func adsPlay(adsName string, adsTag uint16) {
 	var (
 		offset   uint32 = 0
@@ -699,6 +795,7 @@ func adsPlay(adsName string, adsTag uint16) {
 
 	adsStopRequested = 0
 	grUpdateDelay = 0
+	defer adsCleanupPlayback()
 
 	// Play the first ADS chunk of the sequence
 	adsPlayChunk(data, dataSize, offset)
@@ -763,8 +860,12 @@ func adsPlay(adsName string, adsTag uint16) {
 		}
 
 		// Decrease all timers by the shortest one, and wait that amount of time
-		ttmBackgroundThread.timer -= mini
-		ttmCloudsThread.timer -= mini
+		if ttmBackgroundThread.isRunning != 0 {
+			ttmBackgroundThread.timer -= mini
+		}
+		if ttmCloudsThread.isRunning != 0 {
+			ttmCloudsThread.timer -= mini
+		}
 
 		for i := 0; i < MaxTTMThreads; i++ {
 			if ttmThreads[i].isRunning != 0 {
@@ -786,7 +887,7 @@ func adsPlay(adsName string, adsTag uint16) {
 
 				// Managing the timer which was indicated in ADD_SCENE arg3 (neg. value)
 				if ttmThreads[i].sceneTimer > 0 {
-					ttmThreads[i].sceneTimer -= int16(ttmThreads[i].delay)
+					ttmThreads[i].sceneTimer -= int32(ttmThreads[i].delay)
 					if ttmThreads[i].sceneTimer <= 0 {
 						ttmThreads[i].isRunning = 2
 					}
@@ -817,13 +918,6 @@ func adsPlay(adsName string, adsTag uint16) {
 		}
 	}
 
-	for i := 0; i < MaxTTMSlots; i++ {
-		ttmResetSlot(&ttmSlots[i])
-	}
-
-	grRestoreZone(nil, 0, 0, 0, 0)
-
-	adsReleaseAds()
 }
 
 func adsPlayBench() []string {
@@ -979,9 +1073,14 @@ func adsReleaseIsland() {
 		}
 	}
 
+	ttmResetSlot(&ttmCloudsSlot)
+
 	if ttmHolidayThread.isRunning != 0 {
 		ttmHolidayThread.isRunning = 0
-		grFreeLayer(ttmHolidayThread.ttmLayer)
+		if ttmHolidayThread.ttmLayer != nil {
+			grFreeLayer(ttmHolidayThread.ttmLayer)
+			ttmHolidayThread.ttmLayer = nil
+		}
 	}
 }
 
@@ -1010,8 +1109,12 @@ func adsNoIsland() {
 	}
 	if ttmHolidayThread.isRunning != 0 {
 		ttmHolidayThread.isRunning = 0
-		grFreeLayer(ttmHolidayThread.ttmLayer)
+		if ttmHolidayThread.ttmLayer != nil {
+			grFreeLayer(ttmHolidayThread.ttmLayer)
+			ttmHolidayThread.ttmLayer = nil
+		}
 	}
+
 
 	grInitEmptyBackground()
 }
@@ -1037,13 +1140,13 @@ func adsPlayWalk(fromSpot, fromHdg, toSpot, toHdg int) {
 
 	for ttmThreads[0].delay != 0 {
 		// Call each thread which timer reaches 0
-		if ttmBackgroundThread.timer == 0 {
+		if ttmBackgroundThread.isRunning != 0 && ttmBackgroundThread.timer == 0 {
 			debugPrintln("    ------> Animate bg")
 			ttmBackgroundThread.timer = ttmBackgroundThread.delay
 			islandAnimate(&ttmBackgroundThread)
 		}
 
-		if ttmCloudsThread.timer == 0 {
+		if ttmCloudsThread.isRunning != 0 && ttmCloudsThread.timer == 0 {
 			debugPrintln("    ------> Animate clouds")
 			ttmCloudsThread.timer = ttmCloudsThread.delay
 			islandAnimateClouds(&ttmCloudsThread)
@@ -1062,19 +1165,22 @@ func adsPlayWalk(fromSpot, fromHdg, toSpot, toHdg int) {
 			return
 		}
 
-		// Determine min timer from the two threads
-		mini := uint16(300)
-		if ttmBackgroundThread.timer < ttmThreads[0].timer {
+		// Determine the minimum timer among the walking thread and active background threads.
+		mini := ttmThreads[0].timer
+		if ttmBackgroundThread.isRunning != 0 && ttmBackgroundThread.timer < mini {
 			mini = ttmBackgroundThread.timer
-		} else if ttmCloudsThread.timer < ttmThreads[0].timer {
+		}
+		if ttmCloudsThread.isRunning != 0 && ttmCloudsThread.timer < mini {
 			mini = ttmCloudsThread.timer
-		} else {
-			mini = ttmThreads[0].timer
 		}
 
-		// Decrease all timers by the shortest one, and wait that amount of time
-		ttmBackgroundThread.timer -= mini
-		ttmCloudsThread.timer -= mini
+		// Decrease only active timers by the shortest one.
+		if ttmBackgroundThread.isRunning != 0 {
+			ttmBackgroundThread.timer -= mini
+		}
+		if ttmCloudsThread.isRunning != 0 {
+			ttmCloudsThread.timer -= mini
+		}
 		ttmThreads[0].timer -= mini
 
 		debugPrintf(" ******* WAIT: %d ticks *******\n", mini)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math/rand"
 )
 
@@ -47,39 +48,60 @@ func ttmLoadTTM(ttmSlot *TTtmSlot, name string) {
 	ttmSlot.data = ttmResource.UncompressedData
 	ttmSlot.dataSize = ttmResource.UncompressedSize
 	ttmSlot.numTags = int(ttmResource.NumTags)
-	ttmSlot.tags = make([]TTtmTag, ttmSlot.numTags)
 
-	// we have to bookmark every tag for later jumps
-	offset := uint32(0)
-	tagNo := 0
+	tags, err := scanTTMTags(ttmSlot.data, ttmSlot.dataSize, ttmSlot.numTags)
+	if err != nil {
+		panic(fmt.Errorf("TTM resource %s: %w", name, err))
+	}
+	ttmSlot.tags = tags
+	ttmSlot.numTags = len(tags)
+}
 
-	for offset < ttmSlot.dataSize {
-		opCode := peekUint16(ttmSlot.data, &offset)
-
-		if opCode == 0x1111 || opCode == 0x1101 {
-			arg := peekUint16(ttmSlot.data, &offset)
-			ttmSlot.tags[tagNo].id = arg
-			ttmSlot.tags[tagNo].offset = offset
-			tagNo++ // TODO
-		} else {
-			numArgs := uint8(opCode & 0x000f)
-
-			if numArgs == 0x0f {
-				for ttmSlot.data[offset] != 0 && ttmSlot.data[offset+1] != 0 {
-					offset += 2
-				}
-				offset += 2
-			} else {
-				offset += uint32(numArgs) << 1
-			}
-		}
+func scanTTMTags(data []byte, dataSize uint32, maxTags int) ([]TTtmTag, error) {
+	if uint64(dataSize) > uint64(len(data)) {
+		return nil, fmt.Errorf("declared data size %d exceeds buffer size %d", dataSize, len(data))
 	}
 
-	// Keep only real parsed :TAG/:LOCAL_TAG offsets. Leaving padded zero-offset
-	// entries in the active slice can make ttmFindPreviousTag() return 0,
-	// which incorrectly jumps timed loops back to file start.
-	ttmSlot.numTags = tagNo
-	ttmSlot.tags = ttmSlot.tags[:tagNo]
+	tags := make([]TTtmTag, 0, maxTags)
+	offset := uint32(0)
+	for offset < dataSize {
+		if dataSize-offset < 2 {
+			return nil, fmt.Errorf("truncated opcode at offset %d", offset)
+		}
+		opCode := peekUint16(data, &offset)
+		if opCode == 0x1111 || opCode == 0x1101 {
+			if dataSize-offset < 2 {
+				return nil, fmt.Errorf("truncated tag at offset %d", offset)
+			}
+			if len(tags) >= maxTags {
+				return nil, fmt.Errorf("more tags than declared (%d)", maxTags)
+			}
+			arg := peekUint16(data, &offset)
+			tags = append(tags, TTtmTag{id: arg, offset: offset})
+			continue
+		}
+
+		numArgs := uint8(opCode & 0x000f)
+		if numArgs == 0x0f {
+			for {
+				if dataSize-offset < 2 {
+					return nil, fmt.Errorf("unterminated string at offset %d", offset)
+				}
+				if data[offset] == 0 || data[offset+1] == 0 {
+					offset += 2
+					break
+				}
+				offset += 2
+			}
+		} else {
+			argBytes := uint32(numArgs) * 2
+			if argBytes > dataSize-offset {
+				return nil, fmt.Errorf("truncated arguments at offset %d", offset)
+			}
+			offset += argBytes
+		}
+	}
+	return tags, nil
 }
 
 func ttmInitSlot(ttmSlot *TTtmSlot) {
@@ -98,7 +120,7 @@ func ttmResetSlot(ttmSlot *TTtmSlot) {
 	}
 	for i := 0; i < MaxBMPSlots; i++ {
 		if ttmSlot.numSprites[i] != 0 {
-			//grReleaseBmp(ttmSlot, i)
+			grReleaseBmp(ttmSlot, uint16(i))
 		}
 		ttmSlot.baseBmpNames[i] = ""
 		ttmSlot.slotBmpNames[i] = ""
@@ -126,6 +148,41 @@ func primaryAnchorImageNo(ttmSlot *TTtmSlot) (uint16, bool) {
 	return 0, false
 }
 
+func decodeTTMInstruction(data []byte, dataSize uint32, offset *uint32, args *[10]uint16) (uint16, string, error) {
+	if uint64(dataSize) > uint64(len(data)) || *offset > dataSize || dataSize-*offset < 2 {
+		return 0, "", fmt.Errorf("truncated opcode at offset %d", *offset)
+	}
+	opCode := peekUint16(data, offset)
+	numArgs := uint8(opCode) & 0x0f
+	if numArgs == 0x0f {
+		start := *offset
+		for *offset < dataSize && data[*offset] != 0 {
+			*offset = *offset + 1
+		}
+		if *offset >= dataSize {
+			return 0, "", fmt.Errorf("unterminated string at offset %d", start)
+		}
+		str := string(data[start:*offset])
+		*offset = *offset + 1
+		if (*offset-start)&1 == 1 {
+			if *offset >= dataSize {
+				return 0, "", fmt.Errorf("truncated string padding at offset %d", *offset)
+			}
+			*offset = *offset + 1
+		}
+		return opCode, str, nil
+	}
+	if int(numArgs) > len(args) {
+		return 0, "", fmt.Errorf("too many arguments (%d) at offset %d", numArgs, *offset-2)
+	}
+	argBytes := uint32(numArgs) * 2
+	if argBytes > dataSize-*offset {
+		return 0, "", fmt.Errorf("truncated arguments at offset %d", *offset)
+	}
+	peekUint16Block(data, offset, args[:], int(numArgs))
+	return opCode, "", nil
+}
+
 // ttmScanForAnchor looks ahead from offset (without executing anything)
 // through the upcoming opcodes of the CURRENT frame only, searching for a
 // DRAW_SPRITE/DRAW_SPRITE_FLIP using wantImageNo. Stops cleanly at the next
@@ -139,23 +196,10 @@ func ttmScanForAnchor(ttmSlot *TTtmSlot, startOffset uint32, wantImageNo uint16)
 	var args [10]uint16
 
 	for offset < ttmSlot.dataSize {
-		opCode := peekUint16(data, &offset)
-		numArgs := uint8(opCode) & 0x000f
-
-		if numArgs == 0x0f {
-			strStart := offset
-			for offset < ttmSlot.dataSize && data[offset] != 0 {
-				offset++
-			}
-			strLen := offset - strStart
-			offset++ // skip null terminator
-			if (strLen+1)&0x01 == 0x01 {
-				offset++
-			}
-		} else {
-			peekUint16Block(data, &offset, args[:], int(numArgs))
+		opCode, _, err := decodeTTMInstruction(data, ttmSlot.dataSize, &offset, &args)
+		if err != nil {
+			return 0, false
 		}
-
 		switch opCode {
 		case 0x0FF0: // UPDATE - end of this frame, stop
 			return 0, false
@@ -170,13 +214,26 @@ func ttmScanForAnchor(ttmSlot *TTtmSlot, startOffset uint32, wantImageNo uint16)
 	return 0, false
 }
 
+
+func ttmTimerDelay(lo, hi uint16) uint16 {
+	var val uint16
+	if hi > lo {
+		val = lo + uint16(rand.Intn(int(hi-lo)+1))
+	} else {
+		val = lo
+	}
+	if val == 0 {
+		return 1
+	}
+	return val
+}
+
 func ttmPlay(ttmThread *TTtmThread) {
 	var (
 		offset       uint32
 		opCode       uint16
 		continueLoop = true
 		args         [10]uint16
-		strBytesArg  = make([]byte, 200)
 		finalStr     = "" // added by me -- r.c.
 	)
 
@@ -202,37 +259,17 @@ func ttmPlay(ttmThread *TTtmThread) {
 	data := ttmSlot.data
 
 	for continueLoop {
-		opCode = peekUint16(data, &offset)
-		numArgs := uint8(opCode) & 0x000f
-
-		if numArgs == 0x0f {
-			// ✅: verified this null-terminated string parsing works - Ralph
-			i := 0
-
-			for data[offset] != 0 {
-				strBytesArg[i] = data[offset]
-				i++
-				offset++
-			}
-			// r.c - here we have a complete string w/o null terminator (for Go)
-			finalStr = string(strBytesArg[0:i])
-
-			// r.c. - this captures the null terminator (we don't care about it)
-			strBytesArg[i] = data[offset]
-			i++
-			offset++
-
-			// r.c. - this just ensures we're always at an even byte, probably for historical reasons.
-			if i&0x01 == 0x01 { // always read an even number of uint8s
-				strBytesArg[i] = data[offset] // TODO
-				i++
-				offset++
-			}
-		} else {
-			// args are numArgs words
-			peekUint16Block(data, &offset, args[:], int(numArgs))
+		if offset >= ttmSlot.dataSize {
+			ttmThread.isRunning = 2
+			break
 		}
-
+		var err error
+		opCode, finalStr, err = decodeTTMInstruction(data, ttmSlot.dataSize, &offset, &args)
+		if err != nil {
+			debugPrintf("WARN: malformed TTM instruction: %v\n", err)
+			ttmThread.isRunning = 2
+			break
+		}
 		switch opCode {
 		case 0x0080:
 			debugPrintln("\tCLEAR_IMGSLOT")
@@ -260,6 +297,10 @@ func ttmPlay(ttmThread *TTtmThread) {
 			debugPrintf("\tSET DELAY => %d\n", result)
 		case 0x1051:
 			debugPrintf("\tSET BMP SLOT: slot:%d\n", args[0])
+			if int(args[0]) >= MaxBMPSlots {
+				debugPrintf("WARN: BMP slot %d out of range\n", args[0])
+				break
+			}
 			ttmThread.selectedBmpSlot = uint8(args[0])
 		case 0x1061:
 			debugPrintf("\tSET_PALETTE_SLOT: slot:%d\n", args[0])
@@ -294,13 +335,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			// picks a random delay uniformly within that range rather than a
 			// fixed average. This adds the jitter the original animations rely
 			// on instead of always producing the same value.
-			lo, hi := args[0], args[1]
-			var val uint16
-			if hi > lo {
-				val = lo + uint16(rand.Intn(int(hi-lo)+1))
-			} else {
-				val = lo
-			}
+			val := ttmTimerDelay(args[0], args[1])
 			ttmThread.delay = val
 			ttmThread.timer = val
 		case 0x4004:

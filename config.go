@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,43 +54,60 @@ const (
 	SilentEndKey     = "silentEnd="
 )
 
-func cfgFullPath() string {
+func cfgPath(homeDir string) string {
+	return filepath.Join(homeDir, CfgFileName)
+}
+
+func cfgFullPath() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		panic(fmt.Errorf("user home dir: %w", err))
+		return "", fmt.Errorf("user home dir: %w", err)
 	}
+	return cfgPath(homeDir), nil
+}
 
-	fullPath := path.Join(homeDir, CfgFileName)
-	return fullPath
+func formatConfig(cfg *TConfig) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s%d\n", CurrentDayKey, cfg.CurrentDay)
+	fmt.Fprintf(&b, "%s%d\n", DateKey, cfg.CurrentDate)
+	fmt.Fprintf(&b, "%s%t\n", BackgroundKey, cfg.Background)
+	fmt.Fprintf(&b, "%s%t\n", SoundsKey, cfg.Sounds)
+	fmt.Fprintf(&b, "%s%t\n", PasswordKey, cfg.Password)
+	fmt.Fprintf(&b, "%s%d\n", StartTimeKey, cfg.StartTime)
+	fmt.Fprintf(&b, "%s%t\n", UseMesaKey, cfg.UseMesa)
+	fmt.Fprintf(&b, "%s%t\n", MultiInstanceKey, cfg.MultiInstance)
+	fmt.Fprintf(&b, "%s%t\n", WidescreenKey, cfg.Widescreen)
+	fmt.Fprintf(&b, "%s%d\n", FilterModeKey, cfg.FilterMode)
+	fmt.Fprintf(&b, "%s%t\n", ScanlinesKey, cfg.Scanlines)
+	fmt.Fprintf(&b, "%s%t\n", SilentTimeKey, cfg.SilentTime)
+	fmt.Fprintf(&b, "%s%d\n", SilentStartKey, cfg.SilentStart)
+	fmt.Fprintf(&b, "%s%d\n", SilentEndKey, cfg.SilentEnd)
+	return b.String()
 }
 
 func cfgFileWrite(cfg *TConfig) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 
-	f, err := os.Create(cfgFullPath())
+	fullPath, err := cfgFullPath()
+	if err != nil {
+		fmt.Println("WARN: failed to resolve config path with err: ", err.Error())
+		return
+	}
+	f, err := os.Create(fullPath)
 	if err != nil {
 		fmt.Println("WARN: failed to create file with err: ", err.Error())
 		return
 	}
-	defer func() {
-		_ = f.Close()
-	}()
 
-	_, _ = fmt.Fprintf(f, "%s%d\n", CurrentDayKey, cfg.CurrentDay)
-	_, _ = fmt.Fprintf(f, "%s%d\n", DateKey, cfg.CurrentDate)
-	_, _ = fmt.Fprintf(f, "%s%t\n", BackgroundKey, cfg.Background)
-	_, _ = fmt.Fprintf(f, "%s%t\n", SoundsKey, cfg.Sounds)
-	_, _ = fmt.Fprintf(f, "%s%t\n", PasswordKey, cfg.Password)
-	_, _ = fmt.Fprintf(f, "%s%d\n", StartTimeKey, cfg.StartTime)
-	_, _ = fmt.Fprintf(f, "%s%t\n", UseMesaKey, cfg.UseMesa)
-	_, _ = fmt.Fprintf(f, "%s%t\n", MultiInstanceKey, cfg.MultiInstance)
-	_, _ = fmt.Fprintf(f, "%s%t\n", WidescreenKey, cfg.Widescreen)
-	_, _ = fmt.Fprintf(f, "%s%d\n", FilterModeKey, cfg.FilterMode)
-	_, _ = fmt.Fprintf(f, "%s%t\n", ScanlinesKey, cfg.Scanlines)
-	_, _ = fmt.Fprintf(f, "%s%t\n", SilentTimeKey, cfg.SilentTime)
-	_, _ = fmt.Fprintf(f, "%s%d\n", SilentStartKey, cfg.SilentStart)
-	_, _ = fmt.Fprintf(f, "%s%d\n", SilentEndKey, cfg.SilentEnd)
+	if _, err := f.WriteString(formatConfig(cfg)); err != nil {
+		fmt.Println("WARN: failed to write config file with err: ", err.Error())
+		_ = f.Close()
+		return
+	}
+	if err := f.Close(); err != nil {
+		fmt.Println("WARN: failed to close config file with err: ", err.Error())
+	}
 }
 
 func cfgFileRead(cfg *TConfig) {
@@ -111,7 +128,12 @@ func cfgFileRead(cfg *TConfig) {
 	cfg.SilentStart = 2200
 	cfg.SilentEnd = 700
 
-	f, err := os.Open(cfgFullPath())
+	fullPath, err := cfgFullPath()
+	if err != nil {
+		fmt.Println("WARN: failed to resolve config path with err: ", err.Error())
+		return
+	}
+	f, err := os.Open(fullPath)
 	if err != nil {
 		fmt.Println("WARN: failed to read file with err: ", err.Error())
 		return
@@ -129,55 +151,57 @@ func cfgFileRead(cfg *TConfig) {
 			currentDay, err := strconv.Atoi(line[len(CurrentDayKey):])
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "failed to parse currentDay with err: ", err.Error())
+			} else {
+				cfg.CurrentDay = currentDay
 			}
-			cfg.CurrentDay = currentDay
 		} else if strings.HasPrefix(line, DateKey) {
 			d, err := strconv.Atoi(line[len(DateKey):])
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "failed to parse date with err: ", err.Error())
+			} else {
+				cfg.CurrentDate = d
 			}
-			cfg.CurrentDate = d
 		} else if strings.HasPrefix(line, BackgroundKey) {
-			cfg.Background = line[len(BackgroundKey):] == "true"
+			parseConfigBool(line[len(BackgroundKey):], &cfg.Background)
 		} else if strings.HasPrefix(line, SoundsKey) {
-			cfg.Sounds = line[len(SoundsKey):] == "true"
+			parseConfigBool(line[len(SoundsKey):], &cfg.Sounds)
 		} else if strings.HasPrefix(line, PasswordKey) {
-			cfg.Password = line[len(PasswordKey):] == "true"
+			parseConfigBool(line[len(PasswordKey):], &cfg.Password)
 		} else if strings.HasPrefix(line, StartTimeKey) {
 			st, err := strconv.Atoi(line[len(StartTimeKey):])
-			if err == nil {
+			if err == nil && validHHMM(st) {
 				cfg.StartTime = st
 			}
 		} else if strings.HasPrefix(line, UseMesaKey) {
-			cfg.UseMesa = line[len(UseMesaKey):] == "true"
+			parseConfigBool(line[len(UseMesaKey):], &cfg.UseMesa)
 		} else if strings.HasPrefix(line, MultiInstanceKey) {
-			cfg.MultiInstance = line[len(MultiInstanceKey):] == "true"
+			parseConfigBool(line[len(MultiInstanceKey):], &cfg.MultiInstance)
 		} else if strings.HasPrefix(line, WidescreenKey) {
-			cfg.Widescreen = line[len(WidescreenKey):] == "true"
+			parseConfigBool(line[len(WidescreenKey):], &cfg.Widescreen)
 		} else if strings.HasPrefix(line, FilterModeKey) {
 			fm, err := strconv.Atoi(line[len(FilterModeKey):])
-			if err == nil {
+			if err == nil && fm >= 0 && fm < 7 {
 				cfg.FilterMode = fm
 			}
 		} else if strings.HasPrefix(line, ScanlinesKey) {
-			cfg.Scanlines = line[len(ScanlinesKey):] == "true"
+			parseConfigBool(line[len(ScanlinesKey):], &cfg.Scanlines)
 		} else if strings.HasPrefix(line, SilentTimeKey) {
-			cfg.SilentTime = line[len(SilentTimeKey):] == "true"
+			parseConfigBool(line[len(SilentTimeKey):], &cfg.SilentTime)
 		} else if strings.HasPrefix(line, SilentStartKey) {
 			ss, err := strconv.Atoi(line[len(SilentStartKey):])
-			if err == nil {
+			if err == nil && validHHMM(ss) {
 				cfg.SilentStart = ss
 			}
 		} else if strings.HasPrefix(line, SilentEndKey) {
 			se, err := strconv.Atoi(line[len(SilentEndKey):])
-			if err == nil {
+			if err == nil && validHHMM(se) {
 				cfg.SilentEnd = se
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "reading standard input:", err)
+		fmt.Fprintln(os.Stderr, "failed to read config file:", err)
 	}
 }
 
@@ -197,4 +221,18 @@ func isSilentTime() bool {
 		return current >= start && current < end
 	}
 	return current >= start || current < end
+}
+
+func validHHMM(v int) bool {
+	if v < 0 || v > 2359 {
+		return false
+	}
+	return v%100 < 60
+}
+
+func parseConfigBool(value string, dst *bool) {
+	v, err := strconv.ParseBool(value)
+	if err == nil {
+		*dst = v
+	}
 }

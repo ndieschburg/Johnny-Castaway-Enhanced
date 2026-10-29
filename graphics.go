@@ -76,8 +76,13 @@ func writeSharedState() {
 		AdvanceTrigger: lastAdvanceTrigger,
 	}
 	data, err := json.Marshal(state)
-	if err == nil {
-		_ = os.WriteFile(myStatePath, data, 0644)
+	if err != nil {
+		fmt.Printf("Warning: failed to encode shared state: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(myStatePath, data, 0644); err != nil {
+		fmt.Printf("Warning: failed to write shared state: %v\n", err)
 	}
 }
 
@@ -101,22 +106,24 @@ func readSharedState() {
 
 		lastTime, exists := lastReadTimes[file]
 		if !exists || fi.ModTime().After(lastTime) {
-			lastReadTimes[file] = fi.ModTime()
 			data, err := os.ReadFile(file)
-			if err == nil {
-				var state TSharedState
-				if json.Unmarshal(data, &state) == nil {
-					if state.Paused != isPaused {
-						isPaused = state.Paused
-					}
-					if state.MaxSpeed != isMaxSpeed {
-						isMaxSpeed = state.MaxSpeed
-					}
-					if state.AdvanceTrigger != lastAdvanceTrigger {
-						lastAdvanceTrigger = state.AdvanceTrigger
-						advanceOneFrame = true
-					}
-				}
+			if err != nil {
+				continue
+			}
+			var state TSharedState
+			if err := json.Unmarshal(data, &state); err != nil {
+				continue
+			}
+			lastReadTimes[file] = fi.ModTime()
+			if state.Paused != isPaused {
+				isPaused = state.Paused
+			}
+			if state.MaxSpeed != isMaxSpeed {
+				isMaxSpeed = state.MaxSpeed
+			}
+			if state.AdvanceTrigger != lastAdvanceTrigger {
+				lastAdvanceTrigger = state.AdvanceTrigger
+				advanceOneFrame = true
 			}
 		}
 	}
@@ -184,7 +191,7 @@ type TTtmThread struct {
 	sceneSlot       uint16
 	sceneRootTag    uint16
 	sceneTag        uint16
-	sceneTimer      int16
+	sceneTimer      int32
 	sceneIterations uint16
 	ip              uint32
 	delay           uint16
@@ -314,12 +321,29 @@ type settledSpriteEntry struct {
 	count    int
 }
 
+// grDetachBackgroundLayerAlias clears the island thread's borrowed reference
+// before the global background render texture is released or replaced.
+func grDetachBackgroundLayerAlias(background *rl.RenderTexture2D) {
+	if background != nil && ttmBackgroundThread.ttmLayer == background {
+		ttmBackgroundThread.ttmLayer = nil
+	}
+}
+
 func grReleaseScreen() {
+	if grBackgroundSur == nil {
+		return
+	}
+	grDetachBackgroundLayerAlias(grBackgroundSur)
+	grFreeLayer(grBackgroundSur)
 	grBackgroundSur = nil
 }
 
 func grReleaseSavedLayer() {
+	if grSavedZonesLayer == nil {
+		return
+	}
 	debugPrintln("*** SAVED ZONES LAYER RELEASED ***")
+	grFreeLayer(grSavedZonesLayer)
 	grSavedZonesLayer = nil
 }
 
@@ -626,6 +650,9 @@ func graphicsInit() {
 }
 
 func graphicsEnd() {
+	grReleaseSavedLayer()
+	grReleaseScreen()
+
 	if grFinalRenderSur != nil {
 		rl.UnloadRenderTexture(*grFinalRenderSur)
 		grFinalRenderSur = nil
@@ -758,7 +785,12 @@ func grUpdateDisplay(
 			prevEscapeDown = escapeDown
 		}
 
-		if rl.WindowShouldClose() || shouldExitApp {
+		if isScreensaverMode && shouldExitOnDisplayTransition() {
+		shouldExitApp = true
+		return
+	}
+
+	if rl.WindowShouldClose() || shouldExitApp {
 			shouldExitApp = true
 			fmt.Println("exiting...")
 			return
@@ -1112,6 +1144,10 @@ func grUpdateDisplay(
 
 	start := rl.GetTime()
 	for {
+		if isScreensaverMode && shouldExitOnDisplayTransition() {
+			shouldExitApp = true
+			break
+		}
 		draw()
 		if shouldExitApp {
 			break
@@ -1782,8 +1818,17 @@ func grDrawCircle(sur *rl.RenderTexture2D, x1, y1 int16, width, height uint16, f
 	}
 }
 
+func validSpriteIndex(ttmSlot *TTtmSlot, spriteNo, imageNo uint16) bool {
+	if ttmSlot == nil || int(imageNo) >= len(ttmSlot.numSprites) {
+		return false
+	}
+	return int(spriteNo) < ttmSlot.numSprites[imageNo] &&
+		int(spriteNo) < len(ttmSlot.sprites[imageNo]) &&
+		ttmSlot.sprites[imageNo][spriteNo] != nil
+}
+
 func trackLastDraw(ttmThread *TTtmThread, x, y int16, spriteNo, imageNo uint16, flipped bool) {
-	if int(spriteNo) >= ttmThread.ttmSlot.numSprites[imageNo] {
+	if ttmThread == nil || !validSpriteIndex(ttmThread.ttmSlot, spriteNo, imageNo) {
 		return
 	}
 
@@ -2031,7 +2076,7 @@ func computeBlendedOffset(ttmSlot *TTtmSlot, thread *TTtmThread, spriteNo, image
 }
 
 func grDrawSprite(sur *rl.RenderTexture2D, ttmSlot *TTtmSlot, x, y int16, spriteNo, imageNo uint16) {
-	if int(spriteNo) >= ttmSlot.numSprites[imageNo] {
+	if !validSpriteIndex(ttmSlot, spriteNo, imageNo) {
 		fmt.Printf("Warning : grDrawSprite(): less than %d sprites loaded in slot %d\n", imageNo, spriteNo)
 		return
 	}
@@ -2100,7 +2145,7 @@ func grDrawSprite(sur *rl.RenderTexture2D, ttmSlot *TTtmSlot, x, y int16, sprite
 }
 
 func grDrawSpriteFlip(sur *rl.RenderTexture2D, ttmSlot *TTtmSlot, x, y int16, spriteNo, imageNo uint16) {
-	if int(spriteNo) >= ttmSlot.numSprites[imageNo] {
+	if !validSpriteIndex(ttmSlot, spriteNo, imageNo) {
 		fmt.Printf("Warning : grDrawSprite(): less than %d sprites loaded in slot %d\n", imageNo, spriteNo)
 		return
 	}
@@ -2222,9 +2267,16 @@ func grLoadScreen(screenName string) {
 
 	width := int(scrResource.Width)
 	height := int(scrResource.Height)
-	bytesPerRow := int(width) / 2
+	if width < 4 || height <= 0 {
+		panic(fmt.Sprintf("grLoadScreen(): invalid screen dimensions %dx%d", width, height))
+	}
+	bytesPerRow := width / 2
+	requiredBytes := bytesPerRow * height
 
 	data := scrResource.UncompressedData
+	if requiredBytes > len(data) {
+		panic(fmt.Sprintf("grLoadScreen(): screen %s requires %d bytes; only %d available", screenName, requiredBytes, len(data)))
+	}
 	pixelData := make([]byte, 4*width*height)
 
 	for y := 0; y < height; y++ {
@@ -2325,34 +2377,49 @@ func grInitEmptyBackground() {
 	rl.EndTextureMode()
 }
 
+func validateBmpFrames(bmpResource *TBMPResource) error {
+	dataBytes := len(bmpResource.UncompressedData)
+	for img := 0; img < int(bmpResource.NumImages); img++ {
+		width := int(bmpResource.Widths[img])
+		height := int(bmpResource.Heights[img])
+		if width <= 0 || height <= 0 || width%2 != 0 {
+			return fmt.Errorf("image %d has unsupported dimensions %dx%d", img, width, height)
+		}
+		frameBytes := (width / 2) * height
+		if frameBytes <= 0 || frameBytes > dataBytes {
+			return fmt.Errorf("image %d requires %d bytes; %d remain", img, frameBytes, dataBytes)
+		}
+		dataBytes -= frameBytes
+	}
+	return nil
+}
+
 func grLoadBmp(ttmSlot *TTtmSlot, slotNo uint16, name string) {
+	if ttmSlot == nil || int(slotNo) >= len(ttmSlot.numSprites) {
+		debugPrintf("WARN: BMP slot %d out of range - didn't load %s\n", slotNo, name)
+		return
+	}
 	if ttmSlot.numSprites[slotNo] != 0 {
 		grReleaseBmp(ttmSlot, slotNo)
 	}
 
-	// r.c. - record which BMP is currently in this slot so that
-	// shouldScaleSprite can classify slot 3 Johnny poses correctly.
-	upperName := strings.ToUpper(name)
-	ttmSlot.slotBmpNames[slotNo] = upperName
-	if ttmSlot.baseBmpNames[slotNo] == "" {
-		ttmSlot.baseBmpNames[slotNo] = upperName
+	bmpResource := findBMPResource(name)
+	if int(bmpResource.NumImages) > MaxSpritesPerBMP {
+		debugPrintf("WARN: BMP %s has %d images; maximum is %d - didn't load\n", name, bmpResource.NumImages, MaxSpritesPerBMP)
+		return
 	}
 
-	bmpResource := findBMPResource(name)
-
-	ttmSlot.numSprites[slotNo] = int(bmpResource.NumImages)
+	if err := validateBmpFrames(bmpResource); err != nil {
+		debugPrintf("WARN: BMP %s invalid: %v - didn't load\n", name, err)
+		return
+	}
 
 	data := bmpResource.UncompressedData
-	dataOffset := 0 // dataOffset is where each bmp sprites data begins
-
 	for img := 0; img < int(bmpResource.NumImages); img++ {
-		if (bmpResource.Widths[img] % 2) == 1 {
-			panic("grLoadBmp(): can't manage odd widths")
-		}
-
 		width := int(bmpResource.Widths[img])
 		height := int(bmpResource.Heights[img])
-		bytesPerRow := int(width) / 2
+		bytesPerRow := width / 2
+		frameBytes := bytesPerRow * height
 
 		pixelData := make([]byte, 4*width*height)
 
@@ -2395,21 +2462,35 @@ func grLoadBmp(ttmSlot *TTtmSlot, slotNo uint16, name string) {
 				pixelData[idx+2] = c.B
 				pixelData[idx+3] = c.A
 
-				dataOffset = byteIdx
 			}
 		}
 		// segments the data to be the next cel of the sprite.
-		data = data[dataOffset+1:]
+		data = data[frameBytes:]
 		spriteImg := rl.NewImage(pixelData, int32(width), int32(height), 1, rl.UncompressedR8g8b8a8)
 		spriteTexture := rl.LoadTextureFromImage(spriteImg)
 		ttmSlot.sprites[slotNo][img] = &spriteTexture
+		ttmSlot.numSprites[slotNo]++
+	}
+
+	// Record the slot metadata only after every frame loaded successfully.
+	// Failed/partial loads must not make CLEAR_IMGSLOT believe the BMP is present.
+	upperName := strings.ToUpper(name)
+	ttmSlot.slotBmpNames[slotNo] = upperName
+	if ttmSlot.baseBmpNames[slotNo] == "" {
+		ttmSlot.baseBmpNames[slotNo] = upperName
 	}
 }
 
 func grReleaseBmp(ttmSlot *TTtmSlot, bmpSlotNo uint16) {
+	if ttmSlot == nil || int(bmpSlotNo) >= len(ttmSlot.numSprites) {
+		return
+	}
 	for i := 0; i < ttmSlot.numSprites[bmpSlotNo]; i++ {
 		spr := ttmSlot.sprites[bmpSlotNo][i]
-		rl.UnloadTexture(*spr)
+		if spr != nil {
+			rl.UnloadTexture(*spr)
+			ttmSlot.sprites[bmpSlotNo][i] = nil
+		}
 	}
 
 	ttmSlot.numSprites[bmpSlotNo] = 0

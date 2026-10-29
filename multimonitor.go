@@ -1,8 +1,7 @@
 package main
 
 import (
-	"os"
-	"runtime"
+	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
@@ -14,14 +13,12 @@ func getMonitorCount() int {
 	if ret := getMonitorCountWin32(); ret > 0 {
 		return ret
 	}
-	// On every other platform GLFW can only enumerate monitors while it
-	// is initialized, i.e. while a window exists. runStory() calls this
-	// BEFORE opening the real window (it must know the monitor count to
-	// decide between spawning per-monitor children and opening a single
-	// spanning window), so open a tiny throwaway window to initialize
-	// GLFW, count the monitors, and tear it down again. Without this the
-	// count silently comes back as <= 1 on Linux/BSD and multi-instance
-	// mode never spawns its children.
+	if ret := getMonitorCountNative(); ret > 0 {
+		return ret
+	}
+	// Fallback for platforms/build backends without a native pre-window
+	// enumeration path. If a Raylib window already exists, use it directly.
+	// Otherwise retain the old throwaway-window behavior as a last resort.
 	if !rl.IsWindowReady() {
 		rl.InitWindow(64, 64, "")
 		defer rl.CloseWindow()
@@ -41,15 +38,32 @@ type TMonitorRect struct {
 // copy of the scene into each entry's rectangle.
 var monitorRects []TMonitorRect
 
-// isWaylandSession reports whether the process is likely to render through
-// GLFW's Wayland backend. raylib-go builds GLFW with both X11 and Wayland
-// support on Linux, and GLFW 3.4 prefers Wayland whenever WAYLAND_DISPLAY
-// (or a wayland session) is present.
+// isWaylandSession checks the window system actually selected by GLFW after
+// rl.InitWindow. Session environment variables are not reliable here: XWayland
+// clients can inherit WAYLAND_DISPLAY and XDG_SESSION_TYPE=wayland.
 func isWaylandSession() bool {
-	if runtime.GOOS == "windows" {
-		return false
+	return isWaylandPlatform(glfwPlatform())
+}
+
+func isWaylandPlatform(platform int) bool {
+	return platform == glfwPlatformWayland
+}
+
+func validMonitorIndex(index, count int) bool {
+	return index >= 0 && index < count
+}
+
+func selectedMonitorIndex(requested int, hasRequested bool, current int, count int) int {
+	if count < 1 {
+		return 0
 	}
-	return os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland"
+	if hasRequested && validMonitorIndex(requested, count) {
+		return requested
+	}
+	if validMonitorIndex(current, count) {
+		return current
+	}
+	return 0
 }
 
 // setupMonitors sizes and positions the application window to span every
@@ -73,10 +87,8 @@ func setupMonitors() {
 	// the renderer then letterboxes against the actual window size on every
 	// frame, which also absorbs the asynchronous compositor resize.
 	if isWaylandSession() {
-		monitor := rl.GetCurrentMonitor()
-		if hasMonitorIndex {
-			monitor = runOnMonitorIndex
-		}
+		monitorCount := rl.GetMonitorCount()
+		monitor := selectedMonitorIndex(runOnMonitorIndex, hasMonitorIndex, rl.GetCurrentMonitor(), monitorCount)
 
 		pumpFrame := func() {
 			rl.BeginDrawing()
@@ -113,21 +125,28 @@ func setupMonitors() {
 		// monitor (a tiny zoomed scene in a corner). Pump a few frames
 		// first to map the window, then request fullscreen - the only
 		// window placement a Wayland client can rely on.
-		for i := 0; i < 10; i++ {
-			pumpFrame()
+		pumpUntil := func(timeout time.Duration, ready func() bool) {
+			deadline := time.Now().Add(timeout)
+			for {
+				pumpFrame()
+				if ready != nil && ready() {
+					return
+				}
+				if time.Now().After(deadline) {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
 		}
-		if hasMonitorIndex {
-			// A single set_fullscreen(output) request for the target
-			// monitor. Never fullscreen on a guessed monitor first: on
-			// multi-monitor runs two children map on the focused
-			// workspace, and a guess-based transit fullscreen makes one
-			// child occupy (and leak) that workspace's fullscreen slot, so
-			// the sibling's request is silently dropped - Wayland gives
-			// the client no feedback for a dropped request.
-			requestFullscreenOnMonitor(runOnMonitorIndex)
-		} else {
-			rl.ToggleFullscreen()
+		pumpUntil(100*time.Millisecond, nil)
+		// Select the requested output while the window is still windowed. On
+		// Wayland the subsequent fullscreen request is then associated with
+		// that output instead of the compositor-chosen initial one.
+		if hasMonitorIndex && validMonitorIndex(runOnMonitorIndex, monitorCount) && rl.GetCurrentMonitor() != monitor {
+			rl.SetWindowMonitor(monitor)
+			pumpUntil(50*time.Millisecond, nil)
 		}
+		rl.ToggleFullscreen()
 
 		// Wait until the compositor-applied fullscreen resize reaches the
 		// framebuffer, so size-dependent setup done later (e.g. the
@@ -141,30 +160,9 @@ func setupMonitors() {
 		// ground truth a Wayland client can read back.
 		targetW := rl.GetMonitorWidth(monitor)
 		targetH := rl.GetMonitorHeight(monitor)
-		for attempt := 0; attempt < 5; attempt++ {
-			converged := false
-			for i := 0; i < 100; i++ {
-				pumpFrame()
-				if rl.GetRenderWidth() >= targetW-8 && rl.GetRenderHeight() >= targetH-8 {
-					converged = true
-					break
-				}
-			}
-			if converged {
-				break
-			}
-
-			// Not covering the target monitor: unbind the fullscreen
-			// bookkeeping so a fresh request is actually sent (GLFW
-			// early-returns when the monitor is unchanged), then request
-			// fullscreen on the target monitor again.
-			releaseFullscreen()
-			if hasMonitorIndex {
-				requestFullscreenOnMonitor(runOnMonitorIndex)
-			} else {
-				rl.ToggleFullscreen()
-			}
-		}
+		pumpUntil(5*time.Second, func() bool {
+			return rl.GetRenderWidth() >= targetW-8 && rl.GetRenderHeight() >= targetH-8
+		})
 
 		// raylib's logical screen size is not updated by the fullscreen
 		// configure, so resync it with the actual framebuffer size, then
@@ -177,6 +175,10 @@ func setupMonitors() {
 		return
 	}
 	if hasMonitorIndex {
+		count := rl.GetMonitorCount()
+		if !validMonitorIndex(runOnMonitorIndex, count) {
+			runOnMonitorIndex = selectedMonitorIndex(runOnMonitorIndex, true, rl.GetCurrentMonitor(), count)
+		}
 		pos := rl.GetMonitorPosition(runOnMonitorIndex)
 		w := float32(rl.GetMonitorWidth(runOnMonitorIndex))
 		h := float32(rl.GetMonitorHeight(runOnMonitorIndex))
