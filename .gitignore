@@ -13,3 +13,4 @@ tools
 *.scr
 .vscode
 vendor/
+AGENTS.md
