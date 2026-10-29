@@ -159,14 +159,8 @@ func setupMonitors() {
 
 		// Wait until the compositor-applied fullscreen resize reaches the
 		// framebuffer, so size-dependent setup done later (e.g. the
-		// widescreen virtual canvas width) sees the final size and not the
-		// initial 640x480 one.
-		//
-		// xdg fullscreen is only a request, and the compositor may drop it
-		// (e.g. when a fullscreen window just vacated the workspace).
-		// Verify the window really covers its target monitor and re-issue
-		// the request when it does not: the framebuffer size is the only
-		// ground truth a Wayland client can read back.
+		// widescreen virtual canvas width) sees the final size and not
+		// the initial 640x480 one.
 		targetW := rl.GetMonitorWidth(monitor)
 		targetH := rl.GetMonitorHeight(monitor)
 		pumpUntil(5*time.Second, func() bool {
