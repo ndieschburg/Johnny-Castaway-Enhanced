@@ -98,19 +98,49 @@ func setupMonitors() {
 
 		if layerShellMode() {
 			// The window is an overlay layer surface anchored to its whole
-			// output: no fullscreen request to send. Its size was fixed by
-			// the compositor's first configure, which arrived during window
-			// creation - before raylib registered its size callbacks - so
-			// raylib's GL viewport still reflects the initial window size.
-			// SetWindowSize is echoed back by the patched GLFW, which
-			// resets the viewport; pump frames until that has converged.
-			targetW := rl.GetMonitorWidth(monitor)
-			targetH := rl.GetMonitorHeight(monitor)
+			// output: no fullscreen request to send. The compositor's first
+			// configure sizes it to the full output in LOGICAL pixels; that
+			// configure arrived during window creation, before raylib
+			// registered its size callbacks, so read the size back through
+			// GLFW (glfwGetWindowSize) and the scale from wp_fractional_scale
+			// (glfwGetWindowContentScale). rl.GetMonitorWidth would report
+			// the PHYSICAL video mode whenever the output scale is
+			// fractional (wl_output.scale stays 1 there), which made the
+			// overlay scale-times too large on scaled outputs.
+			sx, sy := glfwWindowContentScale()
+			if sx <= 0 {
+				sx = 1
+			}
+			if sy <= 0 {
+				sy = 1
+			}
+			targetW, targetH := 0, 0
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				pumpFrame()
+				if w, h := glfwWindowSize(); w > 0 && h > 0 && (w != 640 || h != 480) {
+					targetW, targetH = w, h
+					break
+				}
+				if time.Now().After(deadline) {
+					// First configure not seen: fall back to the monitor
+					// mode in logical coordinates.
+					targetW = int(float32(rl.GetMonitorWidth(monitor)) / sx)
+					targetH = int(float32(rl.GetMonitorHeight(monitor)) / sy)
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			// SetWindowSize is echoed back by the patched GLFW, which resets
+			// the viewport; pump frames until the framebuffer (logical size
+			// x content scale) has converged.
 			rl.SetWindowSize(targetW, targetH)
+			fbW := int(float32(targetW) * sx)
+			fbH := int(float32(targetH) * sy)
 			converged := false
 			for i := 0; i < 100; i++ {
 				pumpFrame()
-				if rl.GetRenderWidth() >= targetW-8 && rl.GetRenderHeight() >= targetH-8 {
+				if rl.GetRenderWidth() >= fbW-8 && rl.GetRenderHeight() >= fbH-8 {
 					converged = true
 					break
 				}
