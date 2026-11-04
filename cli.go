@@ -50,7 +50,10 @@ func parseCLI(args []string) cliOptions {
 		case lower == "--child" || lower == "-child" || lower == "/child":
 			o.child = true
 		case lower == "--exit-cmd" || lower == "-exit-cmd" || lower == "/exit-cmd":
-			if i+1 < len(args) && !looksLikeOption(args[i+1]) {
+			// Always consume the next argument as the value: the command is
+			// typically an absolute path ("/home/.../wrapper --lock-and-wait …"),
+			// which looksLikeOption would reject as a "/"-prefixed option.
+			if i+1 < len(args) {
 				o.exitCmd = args[i+1]
 				i++
 			}
