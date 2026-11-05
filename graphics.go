@@ -158,6 +158,7 @@ var (
 
 var activeClipZones = make(map[*rl.RenderTexture2D]rl.Rectangle)
 
+
 type TAdsScene struct {
 	slot     uint16
 	tag      uint16
@@ -730,9 +731,13 @@ func grUpdateDisplay(
 			})
 		}
 	} else {
-		screenWidthFloat := float32(rl.GetScreenWidth())
-		screenHeightFloat := float32(rl.GetScreenHeight())
-		rw, rh, ox, oy := computeLetterbox(screenWidthFloat, screenHeightFloat)
+		// Letterbox in RENDER (framebuffer) coordinates, not screen (logical)
+		// ones: on a scaled Wayland output render = screen x content scale, and
+		// the GL world is sized after render, so a screen-sized dest would draw
+		// the scene at 1/scale of the surface.
+		renderWidthFloat := float32(rl.GetRenderWidth())
+		renderHeightFloat := float32(rl.GetRenderHeight())
+		rw, rh, ox, oy := computeLetterbox(renderWidthFloat, renderHeightFloat)
 		monitorDrawRects = append(monitorDrawRects, monitorDrawRect{
 			offsetX: ox,
 			offsetY: oy,
@@ -1075,7 +1080,7 @@ func grUpdateDisplay(
 		// Debug and status overlays — drawn on every active monitor
 		rects := monitorRects
 		if len(rects) == 0 {
-			rects = []TMonitorRect{{X: 0, Y: 0, W: float32(rl.GetScreenWidth()), H: float32(rl.GetScreenHeight())}}
+			rects = []TMonitorRect{{X: 0, Y: 0, W: float32(rl.GetRenderWidth()), H: float32(rl.GetRenderHeight())}}
 		}
 
 		// Debug stuff
