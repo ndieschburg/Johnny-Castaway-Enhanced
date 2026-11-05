@@ -2439,7 +2439,13 @@ void _glfwSetWindowSizeWayland(_GLFWwindow* window, int width, int height)
         // window size callback, and the initial layer configure arrives
         // before such callbacks are registered. Echo the requested size
         // back through the notification path so the viewport follows.
+        // resizeWindow() is a no-op when the size is unchanged (the
+        // compositor's configure already set it), and then it skips
+        // resizeFramebuffer() - call it explicitly so the framebuffer
+        // size callback (raylib's render/viewport size) follows too,
+        // otherwise the scene renders at the initial 640x480 in a corner.
         resizeWindow(window, width, height);
+        resizeFramebuffer(window);
         _glfwInputWindowSize(window, window->wl.width, window->wl.height);
 
         if (window->wl.visible)

@@ -96,114 +96,91 @@ func setupMonitors() {
 			rl.EndDrawing()
 		}
 
-		if layerShellMode() {
-			// The window is an overlay layer surface anchored to its whole
-			// output: no fullscreen request to send. The compositor's first
-			// configure sizes it to the full output in LOGICAL pixels; that
-			// configure arrived during window creation, before raylib
-			// registered its size callbacks, so read the size back through
-			// GLFW (glfwGetWindowSize) and the scale from wp_fractional_scale
-			// (glfwGetWindowContentScale). rl.GetMonitorWidth would report
-			// the PHYSICAL video mode whenever the output scale is
-			// fractional (wl_output.scale stays 1 there), which made the
-			// overlay scale-times too large on scaled outputs.
-			sx, sy := glfwWindowContentScale()
-			if sx <= 0 {
-				sx = 1
-			}
-			if sy <= 0 {
-				sy = 1
-			}
-			targetW, targetH := 0, 0
-			deadline := time.Now().Add(2 * time.Second)
-			for {
-				pumpFrame()
-				if w, h := glfwWindowSize(); w > 0 && h > 0 && (w != 640 || h != 480) {
-					targetW, targetH = w, h
-					break
-				}
-				if time.Now().After(deadline) {
-					// First configure not seen: fall back to the monitor
-					// mode in logical coordinates.
-					targetW = int(float32(rl.GetMonitorWidth(monitor)) / sx)
-					targetH = int(float32(rl.GetMonitorHeight(monitor)) / sy)
-					break
-				}
-				time.Sleep(time.Millisecond)
-			}
-			// SetWindowSize is echoed back by the patched GLFW, which resets
-			// the viewport; pump frames until the framebuffer (logical size
-			// x content scale) has converged.
-			rl.SetWindowSize(targetW, targetH)
-			fbW := int(float32(targetW) * sx)
-			fbH := int(float32(targetH) * sy)
-			converged := false
-			for i := 0; i < 100; i++ {
-				pumpFrame()
-				if rl.GetRenderWidth() >= fbW-8 && rl.GetRenderHeight() >= fbH-8 {
-					converged = true
-					break
-				}
-			}
-
-			// A compositor without wlr-layer-shell support (e.g. GNOME/
-			// Mutter) makes the patched GLFW fall back to a regular xdg
-			// toplevel, and no fullscreen request has been sent yet: run
-			// the standard fullscreen path below in that case.
-			if converged {
-				monitorRects = nil
-				return
-			}
-		}
-
-		// Under Wayland the xdg_toplevel fullscreen request only works
-		// once the surface has been mapped: sending it before the first
-		// buffer swap results in a configure event the compositor never
-		// delivers, so the window (and its framebuffer) stay at the
-		// initial 640x480 while the renderer letterboxes for the full
-		// monitor (a tiny zoomed scene in a corner). Pump a few frames
-		// first to map the window, then request fullscreen - the only
-		// window placement a Wayland client can rely on.
-		pumpUntil := func(timeout time.Duration, ready func() bool) {
+		// waitCompositorSize pumps frames until the compositor has sized the
+		// window to its final (full-output) size in LOGICAL pixels and the
+		// fractional content scale (wp_fractional_scale preferred_scale,
+		// which arrives asynchronously after the first configure) has settled.
+		// Read both through GLFW: rl.GetMonitorWidth would report the
+		// PHYSICAL video mode whenever the output scale is fractional
+		// (wl_output.scale stays 1 there).
+		waitCompositorSize := func(timeout time.Duration) (int, int, float32, float32) {
 			deadline := time.Now().Add(timeout)
-			for {
+			lastW, lastH := -1, -1
+			lastSx, lastSy := float32(-1), float32(-1)
+			stableSince := time.Now()
+			for time.Now().Before(deadline) {
 				pumpFrame()
-				if ready != nil && ready() {
-					return
+				w, h := glfwWindowSize()
+				sx, sy := glfwWindowContentScale()
+				if sx <= 0 {
+					sx = 1
 				}
-				if time.Now().After(deadline) {
-					return
+				if sy <= 0 {
+					sy = 1
 				}
+				if w == lastW && h == lastH && sx == lastSx && sy == lastSy {
+					if w > 0 && h > 0 && (w != 640 || h != 480) && time.Since(stableSince) >= 300*time.Millisecond {
+						return w, h, sx, sy
+					}
+				} else {
+					lastW, lastH, lastSx, lastSy = w, h, sx, sy
+					stableSince = time.Now()
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if lastW > 0 && lastH > 0 {
+				return lastW, lastH, lastSx, lastSy
+			}
+			return 0, 0, 1, 1
+		}
+
+		pumpFrames := func(n int) {
+			for i := 0; i < n; i++ {
+				pumpFrame()
 				time.Sleep(time.Millisecond)
 			}
 		}
-		pumpUntil(100*time.Millisecond, nil)
-		// Select the requested output while the window is still windowed. On
-		// Wayland the subsequent fullscreen request is then associated with
-		// that output instead of the compositor-chosen initial one.
-		if hasMonitorIndex && validMonitorIndex(runOnMonitorIndex, monitorCount) && rl.GetCurrentMonitor() != monitor {
-			rl.SetWindowMonitor(monitor)
-			pumpUntil(50*time.Millisecond, nil)
-		}
-		rl.ToggleFullscreen()
 
-		// Wait until the compositor-applied fullscreen resize reaches the
-		// framebuffer, so size-dependent setup done later (e.g. the
-		// widescreen virtual canvas width) sees the final size and not the
-		// initial 640x480 one.
-		targetW := rl.GetMonitorWidth(monitor)
-		targetH := rl.GetMonitorHeight(monitor)
-		pumpUntil(5*time.Second, func() bool {
-			return rl.GetRenderWidth() >= targetW-8 && rl.GetRenderHeight() >= targetH-8
-		})
-
-		// raylib's logical screen size is not updated by the fullscreen
-		// configure, so resync it with the actual framebuffer size, then
-		// leave monitorRects empty: the renderer letterboxes against the
-		// actual window size on every frame.
-		if rw, rh := rl.GetRenderWidth(), rl.GetRenderHeight(); rw > 0 && rh > 0 {
-			rl.SetWindowSize(rw, rh)
+		if !layerShellMode() {
+			// xdg toplevel: the fullscreen request only works once the surface
+			// is mapped, so pump a few frames first, then request fullscreen -
+			// the only window placement a Wayland client can rely on. Select
+			// the requested output while still windowed so the fullscreen
+			// request lands on it.
+			pumpFrames(100)
+			if hasMonitorIndex && validMonitorIndex(runOnMonitorIndex, monitorCount) && rl.GetCurrentMonitor() != monitor {
+				rl.SetWindowMonitor(monitor)
+				pumpFrames(50)
+			}
+			rl.ToggleFullscreen()
 		}
+		// layer-shell: the first configure (full output, logical size) already
+		// arrived during window creation. A compositor without
+		// wlr-layer-shell support (e.g. GNOME/Mutter) makes the patched GLFW
+		// fall back to a regular xdg toplevel, which then needs the fullscreen
+		// request; detect that by the missing configure.
+
+		targetW, targetH, sx, sy := waitCompositorSize(3 * time.Second)
+		if layerShellMode() && (targetW <= 0 || (targetW == 640 && targetH == 480)) {
+			pumpFrames(100)
+			if hasMonitorIndex && validMonitorIndex(runOnMonitorIndex, monitorCount) && rl.GetCurrentMonitor() != monitor {
+				rl.SetWindowMonitor(monitor)
+			}
+			rl.ToggleFullscreen()
+			targetW, targetH, sx, sy = waitCompositorSize(5 * time.Second)
+		}
+		if targetW <= 0 || targetH <= 0 {
+			// Last resort: derive the logical size from the monitor mode.
+			targetW = int(float32(rl.GetMonitorWidth(monitor)) / sx)
+			targetH = int(float32(rl.GetMonitorHeight(monitor)) / sy)
+		}
+
+		// SetWindowSize is echoed back by the patched GLFW, so raylib's window
+		// (screen) size follows the logical size; the chained window-size
+		// callback (installViewportScaleFix) then sets the GL viewport to the
+		// framebuffer size (logical x content scale).
+		rl.SetWindowSize(targetW, targetH)
+		pumpFrames(30)
 		monitorRects = nil
 		return
 	}

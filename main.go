@@ -643,7 +643,7 @@ func doFadeIn() {
 		// span multiple monitors and be much larger than 640x480; filling
 		// only that fixed corner would leave the rest of the window
 		// showing through as blank during this initial fade-in.
-		rl.DrawRectangle(0, 0, int32(rl.GetScreenWidth()), int32(rl.GetScreenHeight()), rl.Fade(rl.Black, alpha))
+		rl.DrawRectangle(0, 0, int32(rl.GetRenderWidth()), int32(rl.GetRenderHeight()), rl.Fade(rl.Black, alpha))
 		fadeInVal -= 10
 
 		if fadeInVal <= 0 {
@@ -825,7 +825,7 @@ func runBenchMode() {
 	// Keep the window alive to show results on screen
 	rects := monitorRects
 	if len(rects) == 0 {
-		rects = []TMonitorRect{{X: 0, Y: 0, W: float32(rl.GetScreenWidth()), H: float32(rl.GetScreenHeight())}}
+		rects = []TMonitorRect{{X: 0, Y: 0, W: float32(rl.GetRenderWidth()), H: float32(rl.GetRenderHeight())}}
 	}
 
 	for !rl.WindowShouldClose() && !shouldExitApp {

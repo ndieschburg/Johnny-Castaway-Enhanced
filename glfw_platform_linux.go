@@ -37,3 +37,5 @@ func glfwWindowContentScale() (float32, float32) {
 	C.glfwGetWindowContentScale(C.glfwGetCurrentContext(), &x, &y)
 	return float32(x), float32(y)
 }
+
+
